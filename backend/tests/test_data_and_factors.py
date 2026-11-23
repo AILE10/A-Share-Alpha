@@ -106,6 +106,19 @@ class TestPointInTime:
         # ann_date preserved verbatim for every row
         assert list(pd.to_datetime(out["ann_date"])) == list(fin["ann_date"])
 
+    def test_resolve_aligned_start_date_prevents_half_history_gap(self, real_db):
+        from app.data.sync_service import DataSyncService
+
+        svc = DataSyncService(real_db)
+        try:
+            min_d = pd.to_datetime(real_db.query_scalar("SELECT MIN(trade_date) FROM daily_bars")).date()
+            end_d = pd.to_datetime(real_db.query_scalar("SELECT MAX(trade_date) FROM daily_bars")).date()
+            # Asking for a shorter 180-day window must still align back to existing DuckDB floor
+            aligned = svc.resolve_aligned_start_date(end_d, default_days=180)
+            assert aligned == min_d
+        finally:
+            svc.close()
+
 
 # --------------------------------------------------------------------------- universe
 class TestUniverse:

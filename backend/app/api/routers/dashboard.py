@@ -222,8 +222,8 @@ def trigger_data_sync(req: SyncRequest) -> dict:
                 )
             elif req.mode == "active_market":
                 end = today_cn()
-                start = end - timedelta(days=req.days)
-                _emit("syncing calendar & full A-share listing", 0.05)
+                start = svc.resolve_aligned_start_date(end, req.days)
+                _emit(f"syncing calendar & full A-share listing ({start} ~ {end})", 0.05)
                 svc.sync_calendar(start - timedelta(days=365), end)
                 if (svc.db.query_scalar("SELECT COUNT(*) FROM stock_basic") or 0) < 3000:
                     svc.sync_stock_basic(with_industry=True)
@@ -247,7 +247,7 @@ def trigger_data_sync(req: SyncRequest) -> dict:
                 svc.sync_index(start - timedelta(days=120), end)
                 _emit("syncing real capital flow (EM push2his + bulk snapshot)", 0.86)
                 svc.sync_capital_flow(codes, rep, workers=min(6, max(2, req.workers)), resume=True, include_today_bulk=True)
-                _emit("recomputing 16 factors & market regime", 0.92)
+                _emit("recomputing 17 factors & market regime", 0.92)
                 eng = FactorEngine(svc.db)
                 f_run = eng.build(codes=None)
                 eng.persist(f_run)

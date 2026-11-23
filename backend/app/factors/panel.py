@@ -155,6 +155,14 @@ def load_market_panel(
     if bars.empty:
         raise ValueError("daily_bars is empty - run real data sync first (scripts/m1_verify_real_data.py)")
     bars["trade_date"] = pd.to_datetime(bars["trade_date"])
+    # Guard against incomplete trailing dates (e.g. partial CDN settlement mid-sync)
+    day_counts = bars.groupby("trade_date")["ts_code"].nunique().sort_index()
+    if len(day_counts) >= 5:
+        med_cnt = float(day_counts.median())
+        while len(day_counts) > 1 and float(day_counts.iloc[-1]) < 0.30 * med_cnt:
+            drop_dt = day_counts.index[-1]
+            bars = bars[bars["trade_date"] != drop_dt]
+            day_counts = day_counts.iloc[:-1]
     dates = pd.DatetimeIndex(sorted(bars["trade_date"].unique()))
     codes_sorted = sorted(bars["ts_code"].unique().tolist())
 

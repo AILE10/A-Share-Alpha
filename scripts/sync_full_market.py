@@ -61,7 +61,7 @@ def main() -> None:
     t_total = time.time()
     svc = DataSyncService()
     end = today_cn()
-    start = end - timedelta(days=args.days)
+    start = svc.resolve_aligned_start_date(end, args.days)
 
     try:
         print(f"=== [1/6] Sync trade calendar & full A-share listing ({start} ~ {end}) ===", flush=True)

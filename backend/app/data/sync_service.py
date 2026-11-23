@@ -778,6 +778,17 @@ class DataSyncService:
         }
         return picked, stats
 
+    def resolve_aligned_start_date(self, end: date, default_days: int = 730) -> date:
+        """Align sync start date to existing DuckDB history floor so newly added stocks
+        never create half-history cross-sectional gaps in multi-year Walk-Forward backtests."""
+        default_start = end - timedelta(days=default_days)
+        min_d = self.db.query_scalar("SELECT MIN(trade_date) FROM daily_bars")
+        if min_d is not None:
+            existing_floor = pd.to_datetime(min_d).date()
+            if existing_floor < default_start:
+                return existing_floor
+        return default_start
+
     def get_resume_pending_codes(
         self,
         ts_codes: list[str],
