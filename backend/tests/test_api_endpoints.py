@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.api.routers import backtest, broker, dashboard, factors, paper, signals
+from app.core.constants import ALL_FACTOR_NAMES
 from app.main import app
 
 
@@ -48,10 +49,10 @@ def test_core_routers_on_real_data(real_db, sample_codes):
     assert "risk_watermarks" in dash
 
     fac = factors.get_factors_summary(horizon=5, decay_window=20)
-    assert len(fac["factors"]) == 16
+    assert len(fac["factors"]) == len(ALL_FACTOR_NAMES) == 17
 
     corr = factors.get_factor_correlation()
-    assert len(corr["matrix"]) == 16
+    assert len(corr["matrix"]) == len(ALL_FACTOR_NAMES) == 17
 
     detail = factors.get_factor_detail("amihud_20d", horizon=5)
     assert len(detail["quintile_nav"]) > 0

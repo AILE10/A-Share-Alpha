@@ -75,6 +75,7 @@ def compute_factors(panel: MarketPanel) -> FactorSet:
 
     # 2) 流动性与资金流 --------------------------------------------------------
     raw["turnover_ratio_20_60"] = _safe_div(turn.rolling(20, min_periods=15).mean(), turn.rolling(60, min_periods=40).mean())
+    raw["turn_cv_20d"] = _safe_div(turn.rolling(20, min_periods=15).std(), turn.rolling(20, min_periods=15).mean())
     illiq = _safe_div(ret.abs(), amt) * 1e8  # |r| per 100M CNY traded
     raw["amihud_20d"] = illiq.rolling(20, min_periods=15).mean()
     raw["vol_ratio_5d"] = _safe_div(vol, vol.shift(1).rolling(5, min_periods=4).mean())

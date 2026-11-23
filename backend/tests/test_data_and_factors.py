@@ -128,9 +128,10 @@ class TestUniverse:
 
 # --------------------------------------------------------------------------- factors
 class TestFactors:
-    def test_all_16_factors_present(self, factor_run):
+    def test_all_17_factors_present(self, factor_run):
         assert set(factor_run.factors.raw) == set(ALL_FACTOR_NAMES)
-        assert len(ALL_FACTOR_NAMES) == 16
+        assert len(ALL_FACTOR_NAMES) == 17
+        assert "turn_cv_20d" in factor_run.factors.raw
 
     def test_factor_formulas_on_real_prices(self, real_panel, factor_run):
         p = real_panel
@@ -147,6 +148,9 @@ class TestFactors:
         hi, lo, cl = p.hfq_high.loc[t, code], p.hfq_low.loc[t, code], hc.loc[t, code]
         if hi - lo > 1e-9:
             assert factor_run.factors.raw["intraday_pos"].loc[t, code] == pytest.approx((cl - lo) / (hi - lo))
+        turn_win = p.turnover[code].where(~p.is_suspended[code]).iloc[i - 19 : i + 1].dropna()
+        if len(turn_win) >= 15 and abs(turn_win.mean()) > 1e-12:
+            assert factor_run.factors.raw["turn_cv_20d"].loc[t, code] == pytest.approx(turn_win.std() / turn_win.mean())
         pe = p.pe_ttm.loc[t, code]
         if pd.notna(pe) and abs(pe) > 1e-6:
             assert factor_run.factors.raw["ep_ttm"].loc[t, code] == pytest.approx(1 / pe)
@@ -234,7 +238,7 @@ class TestPipeline:
 class TestAnalytics:
     def test_ic_summary_complete(self, factor_run):
         s = factor_run.analysis.summary
-        assert len(s) == 16
+        assert len(s) == len(ALL_FACTOR_NAMES) == 17
         assert s["rank_ic_mean"].notna().sum() >= 12
         assert s["rank_ic_mean"].abs().max() < 0.6     # sanity: real cross-sectional IC magnitude
 
@@ -243,6 +247,6 @@ class TestAnalytics:
         assert list(nav.columns) == ["Q1", "Q2", "Q3", "Q4", "Q5", "LS"]
         assert (nav > 0).all().all()
         corr = factor_run.analysis.correlation
-        assert corr.shape == (16, 16)
+        assert corr.shape == (len(ALL_FACTOR_NAMES), len(ALL_FACTOR_NAMES)) == (17, 17)
         valid = [n for n in corr.index if corr.loc[n, n] != 0]
         assert np.allclose(np.diag(corr.loc[valid, valid]), 1.0)

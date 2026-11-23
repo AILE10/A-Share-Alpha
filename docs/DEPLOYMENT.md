@@ -5,7 +5,7 @@
 - **后端**：Python 3.11+ / FastAPI / APScheduler / LightGBM / DuckDB / SQLite
 - **前端**：React 18 + TypeScript + Vite + Tailwind CSS + Ant Design + ECharts + TradingView Lightweight Charts
 - **双引擎本地存储**（均位于 `data/` 目录）：
-  - `data/market_analytics.duckdb`：真实 A 股日线（未复权 + 后复权因子）、PIT 公告日财报、指数日线、申万一级行业、四维 16 因子与 IC 时序。
+  - `data/market_analytics.duckdb`：真实 A 股日线（未复权 + 后复权因子）、PIT 公告日财报、指数日线、申万一级行业、四维 17 因子与 IC 时序。
   - `data/studio_state.db`：模拟实盘账本/持仓/成交流水、推荐归因、回测历史、周度复盘、模型版本快照、风控配置与审计日志。
   - `data/models/`：LightGBM 模型版本快照文件（支持一键重训与无损回滚）。
 

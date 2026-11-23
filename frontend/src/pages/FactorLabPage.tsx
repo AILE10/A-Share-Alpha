@@ -56,7 +56,7 @@ export const FactorLabPage: React.FC = () => {
       await loadAll();
       const d = await api.getFactorDetail(selected, 5);
       setDetail(d);
-      message.success('已完成四维 16 因子重算与单因子检验');
+      message.success('已完成四维 17 因子重算与单因子检验');
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '重算失败');
     } finally {
@@ -307,7 +307,7 @@ export const FactorLabPage: React.FC = () => {
 
       {/* Correlation Heatmap */}
       <div className="quant-card p-4">
-        <div className="text-sm font-semibold text-slate-200 mb-2">16×16 因子横截面 Spearman 相关性热力图</div>
+        <div className="text-sm font-semibold text-slate-200 mb-2">17×17 因子横截面 Spearman 相关性热力图</div>
         <EChartsBox option={heatmapOption} height={420} />
       </div>
     </div>

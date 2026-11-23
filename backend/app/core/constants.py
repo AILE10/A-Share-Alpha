@@ -33,7 +33,7 @@ DEFAULT_MIN_LIST_DAYS = 120
 DEFAULT_MIN_AVG_AMOUNT_20D = 50_000_000.0  # 5000 万元
 DEFAULT_MICRO_CAP_QUANTILE = 0.10          # 剔除总市值后 10%
 
-# 4-Dimension 16 Core Factors Metadata
+# 4-Dimension 17 Core Factors Metadata
 FACTOR_DEFINITIONS: list[dict[str, str | int]] = [
     # 1. 量价与动量反转
     {"name": "ret_20d", "label": "20日收益率", "dimension": "量价与动量反转", "direction": 1},
@@ -55,6 +55,8 @@ FACTOR_DEFINITIONS: list[dict[str, str | int]] = [
     {"name": "bp", "label": "BP (1/PB)", "dimension": "基本面质量与排雷", "direction": 1},
     {"name": "roe_ttm", "label": "ROE_TTM (PIT)", "dimension": "基本面质量与排雷", "direction": 1},
     {"name": "np_yoy_q", "label": "单季归母净利同比 (PIT)", "dimension": "基本面质量与排雷", "direction": 1},
+    # 5. 正交筹码稳定度增量因子 (Path A 实证通过: ICIR=-0.742, 胜率78%, 最大相关性0.419)
+    {"name": "turn_cv_20d", "label": "20日换手变异系数", "dimension": "流动性与资金流", "direction": -1},
 ]
 
 ALL_FACTOR_NAMES: list[str] = [str(f["name"]) for f in FACTOR_DEFINITIONS]
