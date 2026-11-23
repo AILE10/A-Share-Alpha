@@ -1,0 +1,12 @@
+{
+  "name": "a-share-alpha-studio",
+  "displayName": "A-Share Alpha Studio",
+  "version": "0.1.0",
+  "description": "个人 A 股全栈实时量化投研、Purged Walk-Forward 回测、模拟实盘与合规辅助交易插件，内置 5 条量化风控红线、一键部署运维技能与多因子/LightGBM 投研工作流。",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "一键初始化并启动 A-Share Alpha Studio 前后端量化工作台",
+    "同步最新真实 A 股行情与 PIT 财报并输出四维因子 IC 检验报告",
+    "运行 Purged Walk-Forward 回测并生成本周模拟盘复盘与调仓建议"
+  ]
+}

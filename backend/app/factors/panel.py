@@ -1,0 +1,231 @@
+"""Wide-format (date x ts_code) market panel loaded from the real DuckDB store.
+
+Price conventions (guardrail #2):
+  * raw_*  : unadjusted exchange prices -> limit-up/down checks, lot sizing, fee & fill prices
+  * hfq_*  : backward-adjusted prices (raw * adj_factor) -> returns, momentum, MA, ATR, volatility
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date
+
+import numpy as np
+import pandas as pd
+
+from app.core.constants import BENCHMARK_CSI1000, BENCHMARK_CSI300
+from app.db.duckdb_client import DuckDBClient, get_duckdb
+
+
+@dataclass
+class MarketPanel:
+    dates: pd.DatetimeIndex
+    codes: list[str]
+    open: pd.DataFrame
+    high: pd.DataFrame
+    low: pd.DataFrame
+    close: pd.DataFrame
+    pre_close: pd.DataFrame
+    volume: pd.DataFrame
+    amount: pd.DataFrame
+    turnover: pd.DataFrame
+    adj: pd.DataFrame
+    is_st: pd.DataFrame
+    is_suspended: pd.DataFrame
+    pe_ttm: pd.DataFrame
+    pb: pd.DataFrame
+    total_mv: pd.DataFrame
+    limit_up: pd.DataFrame
+    limit_down: pd.DataFrame
+    index_close: dict[str, pd.Series] = field(default_factory=dict)
+    index_bars: dict[str, pd.DataFrame] = field(default_factory=dict)
+    basic: pd.DataFrame = field(default_factory=pd.DataFrame)
+    capital_flow_ratio: pd.DataFrame | None = None
+    fundamentals: dict[str, pd.DataFrame] = field(default_factory=dict)
+
+    # backward-adjusted prices ---------------------------------------------
+    @property
+    def hfq_close(self) -> pd.DataFrame:
+        return self.close * self.adj
+
+    @property
+    def hfq_open(self) -> pd.DataFrame:
+        return self.open * self.adj
+
+    @property
+    def hfq_high(self) -> pd.DataFrame:
+        return self.high * self.adj
+
+    @property
+    def hfq_low(self) -> pd.DataFrame:
+        return self.low * self.adj
+
+    @property
+    def returns(self) -> pd.DataFrame:
+        return self.hfq_close.pct_change(fill_method=None)
+
+    def industry_of(self) -> pd.Series:
+        if self.basic.empty:
+            return pd.Series("未分类", index=self.codes)
+        return self.basic.set_index("ts_code").reindex(self.codes)["sw_l1_name"].fillna("未分类")
+
+    def name_of(self) -> pd.Series:
+        if self.basic.empty:
+            return pd.Series("", index=self.codes)
+        return self.basic.set_index("ts_code").reindex(self.codes)["name"].fillna("")
+
+    def slice_until(self, end: pd.Timestamp) -> "MarketPanel":
+        """Return a panel truncated at `end` (inclusive) - used by look-ahead tests."""
+        mask = self.dates <= end
+        d = self.dates[mask]
+
+        def cut(df: pd.DataFrame | None) -> pd.DataFrame | None:
+            return None if df is None else df.loc[df.index <= end]
+
+        return MarketPanel(
+            dates=d, codes=self.codes,
+            open=cut(self.open), high=cut(self.high), low=cut(self.low), close=cut(self.close),
+            pre_close=cut(self.pre_close), volume=cut(self.volume), amount=cut(self.amount),
+            turnover=cut(self.turnover), adj=cut(self.adj), is_st=cut(self.is_st),
+            is_suspended=cut(self.is_suspended), pe_ttm=cut(self.pe_ttm), pb=cut(self.pb),
+            total_mv=cut(self.total_mv), limit_up=cut(self.limit_up), limit_down=cut(self.limit_down),
+            index_close={k: v.loc[v.index <= end] for k, v in self.index_close.items()},
+            index_bars={k: v.loc[v.index <= end] for k, v in self.index_bars.items()},
+            basic=self.basic,
+            capital_flow_ratio=cut(self.capital_flow_ratio),
+            fundamentals={k: cut(v) for k, v in self.fundamentals.items()},
+        )
+
+
+def _pivot(df: pd.DataFrame, col: str, dates: pd.DatetimeIndex, codes: list[str]) -> pd.DataFrame:
+    wide = df.pivot(index="trade_date", columns="ts_code", values=col)
+    return wide.reindex(index=dates, columns=codes)
+
+
+def load_pit_fundamentals(db: DuckDBClient, codes: list[str], start: date, end: date) -> pd.DataFrame:
+    """Point-in-time fundamentals via DuckDB ASOF JOIN on the REAL announcement date.
+
+    Strict inequality `trade_date > ann_date`: a report announced on day t (often after close)
+    is first usable on the next trading day -> zero look-ahead (guardrail #3). end_date is
+    never used for alignment.
+    """
+    if not codes:
+        return pd.DataFrame(columns=["ts_code", "trade_date", "roe_ttm", "np_yoy_q", "ann_date", "end_date"])
+    code_list = ",".join(f"'{c}'" for c in codes)
+    sql = f"""
+        WITH b AS (
+            SELECT ts_code, trade_date FROM daily_bars
+            WHERE ts_code IN ({code_list}) AND trade_date BETWEEN ? AND ?
+        ),
+        f_dedup AS (
+            SELECT ts_code, ann_date, end_date, roe_ttm, np_yoy_q
+            FROM (
+                SELECT ts_code, ann_date, end_date, roe_ttm, np_yoy_q,
+                       ROW_NUMBER() OVER (PARTITION BY ts_code, ann_date ORDER BY end_date DESC) AS rn
+                FROM financial_pit
+            )
+            WHERE rn = 1
+        )
+        SELECT b.ts_code, b.trade_date, f.roe_ttm, f.np_yoy_q, f.ann_date, f.end_date
+        FROM b
+        ASOF LEFT JOIN f_dedup f
+          ON b.ts_code = f.ts_code AND b.trade_date > f.ann_date
+        ORDER BY b.ts_code, b.trade_date
+    """
+    return db.query_df(sql, [start, end])
+
+
+def load_market_panel(
+    codes: list[str] | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    db: DuckDBClient | None = None,
+) -> MarketPanel:
+    db = db or get_duckdb()
+    where, params = ["1=1"], []
+    if codes:
+        where.append("ts_code IN (" + ",".join(f"'{c}'" for c in codes) + ")")
+    if start:
+        where.append("trade_date >= ?")
+        params.append(start)
+    if end:
+        where.append("trade_date <= ?")
+        params.append(end)
+    bars = db.query_df(f"SELECT * FROM daily_bars WHERE {' AND '.join(where)} ORDER BY trade_date, ts_code", params)
+    if bars.empty:
+        raise ValueError("daily_bars is empty - run real data sync first (scripts/m1_verify_real_data.py)")
+    bars["trade_date"] = pd.to_datetime(bars["trade_date"])
+    dates = pd.DatetimeIndex(sorted(bars["trade_date"].unique()))
+    codes_sorted = sorted(bars["ts_code"].unique().tolist())
+
+    num_cols = ["open", "high", "low", "close", "pre_close", "volume", "amount", "turnover_rate",
+                "adj_factor", "pe_ttm", "pb", "total_mv", "limit_up", "limit_down"]
+    piv = {c: _pivot(bars, c, dates, codes_sorted).astype(float) for c in num_cols}
+    is_st = _pivot(bars, "is_st", dates, codes_sorted).astype("boolean").fillna(False).astype(bool)
+    is_susp = _pivot(bars, "is_suspended", dates, codes_sorted)
+    # Missing bar on an open day (stock not trading / not yet listed) is treated as suspended
+    is_susp = is_susp.astype("boolean").fillna(True).astype(bool)
+    piv["adj_factor"] = piv["adj_factor"].ffill().bfill().fillna(1.0)
+
+    idx_close: dict[str, pd.Series] = {}
+    idx_bars: dict[str, pd.DataFrame] = {}
+    for code in (BENCHMARK_CSI1000, BENCHMARK_CSI300):
+        idf = db.query_df("SELECT * FROM index_daily WHERE index_code = ? ORDER BY trade_date", [code])
+        if not idf.empty:
+            idf["trade_date"] = pd.to_datetime(idf["trade_date"])
+            idf = idf.set_index("trade_date")
+            idx_bars[code] = idf.reindex(dates).ffill()
+            idx_close[code] = idx_bars[code]["close"].astype(float)
+
+    basic = db.query_df("SELECT * FROM stock_basic WHERE ts_code IN (" + ",".join(f"'{c}'" for c in codes_sorted) + ")")
+
+    cf = db.query_df(
+        "SELECT ts_code, trade_date, main_net_inflow_ratio FROM capital_flow_daily WHERE status = 'OK' AND ts_code IN ("
+        + ",".join(f"'{c}'" for c in codes_sorted) + ")"
+    )
+    cf_wide = None
+    if not cf.empty:
+        cf["trade_date"] = pd.to_datetime(cf["trade_date"])
+        cf_wide = cf.pivot_table(index="trade_date", columns="ts_code", values="main_net_inflow_ratio").reindex(index=dates, columns=codes_sorted)
+
+    fund = load_pit_fundamentals(db, codes_sorted, dates[0].date(), dates[-1].date())
+    fundamentals: dict[str, pd.DataFrame] = {}
+    if not fund.empty:
+        fund["trade_date"] = pd.to_datetime(fund["trade_date"])
+        for col in ("roe_ttm", "np_yoy_q"):
+            fundamentals[col] = fund.pivot_table(index="trade_date", columns="ts_code", values=col, dropna=False).reindex(index=dates, columns=codes_sorted)
+
+    return MarketPanel(
+        dates=dates, codes=codes_sorted,
+        open=piv["open"], high=piv["high"], low=piv["low"], close=piv["close"],
+        pre_close=piv["pre_close"], volume=piv["volume"].fillna(0.0), amount=piv["amount"].fillna(0.0),
+        turnover=piv["turnover_rate"], adj=piv["adj_factor"], is_st=is_st, is_suspended=is_susp,
+        pe_ttm=piv["pe_ttm"], pb=piv["pb"], total_mv=piv["total_mv"],
+        limit_up=piv["limit_up"], limit_down=piv["limit_down"],
+        index_close=idx_close, index_bars=idx_bars, basic=basic,
+        capital_flow_ratio=cf_wide, fundamentals=fundamentals,
+    )
+
+
+def trading_days_since_listing(panel: MarketPanel, all_trade_dates: pd.DatetimeIndex | None = None) -> pd.DataFrame:
+    """Number of exchange trading days since IPO for each (date, code)."""
+    cal = all_trade_dates if all_trade_dates is not None else panel.dates
+    cal = pd.DatetimeIndex(sorted(cal))
+    out = pd.DataFrame(index=panel.dates, columns=panel.codes, dtype=float)
+    list_dates = {}
+    if not panel.basic.empty:
+        list_dates = dict(zip(panel.basic["ts_code"], pd.to_datetime(panel.basic["list_date"])))
+    date_pos = cal.searchsorted(panel.dates, side="right")
+    for code in panel.codes:
+        ld = list_dates.get(code)
+        if ld is None or pd.isna(ld):
+            # unknown IPO date: count available bars as conservative lower bound
+            out[code] = (~panel.is_suspended[code]).cumsum().to_numpy(dtype=float) + 0.0
+            continue
+        lpos = cal.searchsorted(ld, side="left")
+        out[code] = (date_pos - lpos).astype(float)
+    return out
+
+
+def np_nan_like(df: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame(np.nan, index=df.index, columns=df.columns)

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local Data, Models, Archives & Personal Secrets (NEVER commit)
+data/*
+!data/.gitkeep
+*.duckdb
+*.duckdb.wal
+*.db
+*.db-wal
+*.db-shm
+*.zip
+*.env
+*.env.local
+backend/.env
+!.env.example
+!backend/.env.example
+
+# Logs, Temp & OS
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
