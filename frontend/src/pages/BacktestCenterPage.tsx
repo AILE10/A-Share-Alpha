@@ -420,7 +420,7 @@ export const BacktestCenterPage: React.FC = () => {
     return {
       tooltip: { trigger: 'axis' as const },
       legend: { top: 0, textStyle: { color: '#CBD5E1', fontSize: 11 }, data: ['TreeSHAP(%)', 'Gain(%)'] },
-      grid: { left: 135, right: 20, top: 28, bottom: 20 },
+      grid: { left: 12, right: 20, top: 28, bottom: 20, containLabel: true },
       xAxis: { type: 'value' as const, splitLine: { lineStyle: { color: '#1E293B' } } },
       yAxis: { type: 'category' as const, data: entries.map((e) => e.name), axisLabel: { fontSize: 11 } },
       series: [
