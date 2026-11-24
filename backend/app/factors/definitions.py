@@ -66,16 +66,23 @@ def compute_factors(panel: MarketPanel) -> FactorSet:
     status: dict[str, str] = {}
 
     # 1) 量价与动量反转 --------------------------------------------------------
+    ho = panel.hfq_open
     raw["ret_20d"] = hc / hc.shift(20) - 1.0
     raw["ret_60d"] = hc / hc.shift(60) - 1.0
     raw["rev_5d"] = -(hc / hc.shift(5) - 1.0)
     raw["pv_corr_20d"] = rolling_corr_frame(hc, vol.fillna(0.0), 20)
     rng = (hh - hl)
     raw["intraday_pos"] = _safe_div(hc - hl, rng).where(rng > 1e-9, 0.5).where(active)
+    intra_r = (_safe_div(hc, ho) - 1.0).clip(-0.20, 0.20)
+    overnight_r = (_safe_div(ho, hc.shift(1)) - 1.0).clip(-0.20, 0.20)
+    raw["smart_intra_minus_on_20d"] = (intra_r - overnight_r).rolling(20, min_periods=15).mean()
 
     # 2) 流动性与资金流 --------------------------------------------------------
-    raw["turnover_ratio_20_60"] = _safe_div(turn.rolling(20, min_periods=15).mean(), turn.rolling(60, min_periods=40).mean())
-    raw["turn_cv_20d"] = _safe_div(turn.rolling(20, min_periods=15).std(), turn.rolling(20, min_periods=15).mean())
+    t5 = turn.rolling(5, min_periods=4).mean()
+    t20 = turn.rolling(20, min_periods=15).mean()
+    raw["turnover_ratio_20_60"] = _safe_div(t20, turn.rolling(60, min_periods=40).mean())
+    raw["turn_cv_20d"] = _safe_div(turn.rolling(20, min_periods=15).std(), t20)
+    raw["turn_ratio_5_20"] = np.log((t5 + 1e-4) / (t20 + 1e-4)).replace([np.inf, -np.inf], np.nan)
     illiq = _safe_div(ret.abs(), amt) * 1e8  # |r| per 100M CNY traded
     raw["amihud_20d"] = illiq.rolling(20, min_periods=15).mean()
     raw["vol_ratio_5d"] = _safe_div(vol, vol.shift(1).rolling(5, min_periods=4).mean())
@@ -111,6 +118,7 @@ def compute_factors(panel: MarketPanel) -> FactorSet:
     all_sq = (ret ** 2).rolling(20, min_periods=15).sum()
     raw["downside_vol_ratio_20d"] = _safe_div(down_sq, all_sq)
     raw["price_pct_60d"] = hc.rolling(60, min_periods=40).rank(pct=True)
+    raw["high_120d_prox"] = _safe_div(hc, hh.rolling(120, min_periods=60).max())
 
     # 4) 基本面质量与排雷 (PIT aligned by ann_date) ----------------------------
     pe = panel.pe_ttm.where(panel.pe_ttm.abs() > 1e-6)

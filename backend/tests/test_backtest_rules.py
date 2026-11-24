@@ -431,3 +431,11 @@ class TestRealDataBacktestIntegration:
         assert base.idx_cnt_19 == 19
         assert base.idx_cnt_59 == 59
         assert base.idx_close_5d_ago is not None and base.idx_close_5d_ago > 0
+
+        # Golden-Cross TopSafe asymmetric rules verification
+        assert classify_regime_point(7200, 7000, 6800, 0.52, 0.02, cfg) == ("OFFENSIVE", 0.98)
+        assert classify_regime_point(7000, 7050, 6800, 0.44, 0.00, cfg) == ("NEUTRAL", 0.75)  # >= MA20*0.985
+        assert classify_regime_point(6880, 7050, 6800, 0.44, -0.02, cfg) == ("NEUTRAL", 0.45)  # top break < MA20*0.985
+        assert classify_regime_point(6600, 6500, 6800, 0.45, 0.02, cfg) == ("NEUTRAL", 0.30)  # death-cross bounce
+        assert classify_regime_point(6200, 6500, 6800, 0.22, -0.03, cfg) == ("DEFENSIVE", 0.0)  # deep bear 0% cash
+        assert classify_regime_point(6200, 6500, 6800, 0.30, -0.02, cfg) == ("DEFENSIVE", 0.10)  # regular bear 10%

@@ -307,7 +307,7 @@ export const FactorLabPage: React.FC = () => {
 
       {/* Correlation Heatmap */}
       <div className="quant-card p-4">
-        <div className="text-sm font-semibold text-slate-200 mb-2">17×17 因子横截面 Spearman 相关性热力图</div>
+        <div className="text-sm font-semibold text-slate-200 mb-2">20×20 因子横截面 Spearman 相关性热力图</div>
         <EChartsBox option={heatmapOption} height={420} />
       </div>
     </div>

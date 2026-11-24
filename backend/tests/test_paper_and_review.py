@@ -114,8 +114,13 @@ def test_real_data_recommender_model_rollback_and_weekly_review(tmp_path, real_d
         paper_svc = PaperTradingService(duckdb_client=real_db, sqlite_db=sqlite)
         paper_svc.recommender = rec_engine
         rebal = paper_svc.run_rebalance(codes=sample_codes, override_mode="PAPER", fetch_live_quotes=False)
-        assert len(rebal["orders_executed"]) > 0
-        assert rebal["positions_count"] > 0
+        target_exp = float(bundle.regime.get("target_exposure", 0.0))
+        if target_exp > 1e-6:
+            assert len(rebal["orders_executed"]) > 0
+            assert rebal["positions_count"] > 0
+        else:
+            # On real DEFENSIVE (0%) extreme-bear dates, cash-protection MUST block all new BUYs
+            assert rebal["positions_count"] == 0
 
         review = WeeklyReviewEngine(duckdb_client=real_db, sqlite_db=sqlite).generate_review()
         assert review["review_id"]
@@ -127,7 +132,9 @@ def test_real_data_recommender_model_rollback_and_weekly_review(tmp_path, real_d
         assert reset_res["account"]["initial_cash"] == pytest.approx(300_000.0)
         assert reset_res["account"]["cash"] == pytest.approx(300_000.0)
         assert reset_res["account"]["total_equity"] == pytest.approx(300_000.0)
-        assert reset_res["cleared"]["positions"] >= 1
+        if target_exp > 1e-6:
+            assert reset_res["cleared"]["positions"] >= 1
+        assert reset_res["cleared"]["signals"] >= 1
         assert len(paper_svc.gateway.paper.get_account_state()["positions"]) == 0
         assert len(paper_svc.get_nav_history()) == 0
     finally:

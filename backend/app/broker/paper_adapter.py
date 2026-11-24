@@ -154,12 +154,12 @@ class PaperBrokerAdapter(BaseBrokerAdapter):
             session.query(PaperNavDaily.total_equity)
             .filter(PaperNavDaily.account_id == acct.account_id)
             .order_by(PaperNavDaily.trade_date.desc())
-            .limit(120)
+            .limit(90)
             .all()
         )
         hist_eq = [float(r[0]) for r in reversed(nav_rows)]
         acct.peak_equity = round(
-            compute_rolling_peak(hist_eq, acct.total_equity, acct.peak_equity, window_days=120),
+            compute_rolling_peak(hist_eq, acct.total_equity, acct.peak_equity, window_days=90),
             2,
         )
         acct.current_drawdown = round(acct.total_equity / max(acct.peak_equity, 1.0) - 1.0, 6)

@@ -33,7 +33,7 @@ DEFAULT_MIN_LIST_DAYS = 120
 DEFAULT_MIN_AVG_AMOUNT_20D = 50_000_000.0  # 5000 万元
 DEFAULT_MICRO_CAP_QUANTILE = 0.10          # 剔除总市值后 10%
 
-# 4-Dimension 17 Core Factors Metadata
+# 4-Dimension 20 Core Factors Metadata
 FACTOR_DEFINITIONS: list[dict[str, str | int]] = [
     # 1. 量价与动量反转
     {"name": "ret_20d", "label": "20日收益率", "dimension": "量价与动量反转", "direction": 1},
@@ -41,8 +41,11 @@ FACTOR_DEFINITIONS: list[dict[str, str | int]] = [
     {"name": "rev_5d", "label": "5日短期反转", "dimension": "量价与动量反转", "direction": 1},
     {"name": "pv_corr_20d", "label": "20日量价相关性", "dimension": "量价与动量反转", "direction": -1},
     {"name": "intraday_pos", "label": "日内收盘位置", "dimension": "量价与动量反转", "direction": -1},
+    {"name": "smart_intra_minus_on_20d", "label": "20日日内-隔夜收益差", "dimension": "量价与动量反转", "direction": -1},
     # 2. 流动性与资金流
     {"name": "turnover_ratio_20_60", "label": "20/60日异常换手", "dimension": "流动性与资金流", "direction": -1},
+    {"name": "turn_cv_20d", "label": "20日换手变异系数", "dimension": "流动性与资金流", "direction": -1},
+    {"name": "turn_ratio_5_20", "label": "5/20日对数换手比", "dimension": "流动性与资金流", "direction": -1},
     {"name": "amihud_20d", "label": "Amihud非流动性", "dimension": "流动性与资金流", "direction": 1},
     {"name": "vol_ratio_5d", "label": "5日量比", "dimension": "流动性与资金流", "direction": 1},
     {"name": "main_net_inflow_ratio", "label": "主力净流入占比", "dimension": "流动性与资金流", "direction": 1},
@@ -50,13 +53,12 @@ FACTOR_DEFINITIONS: list[dict[str, str | int]] = [
     {"name": "idio_vol_20d", "label": "20日特质波动率", "dimension": "波动率与筹码结构", "direction": -1},
     {"name": "downside_vol_ratio_20d", "label": "下行波动率占比", "dimension": "波动率与筹码结构", "direction": -1},
     {"name": "price_pct_60d", "label": "60日价格分位数", "dimension": "波动率与筹码结构", "direction": -1},
+    {"name": "high_120d_prox", "label": "距120日新高距离", "dimension": "波动率与筹码结构", "direction": 1},
     # 4. 基本面质量与排雷
     {"name": "ep_ttm", "label": "EP (1/PE_TTM)", "dimension": "基本面质量与排雷", "direction": 1},
     {"name": "bp", "label": "BP (1/PB)", "dimension": "基本面质量与排雷", "direction": 1},
     {"name": "roe_ttm", "label": "ROE_TTM (PIT)", "dimension": "基本面质量与排雷", "direction": 1},
     {"name": "np_yoy_q", "label": "单季归母净利同比 (PIT)", "dimension": "基本面质量与排雷", "direction": 1},
-    # 5. 正交筹码稳定度增量因子 (Path A 实证通过: ICIR=-0.742, 胜率78%, 最大相关性0.419)
-    {"name": "turn_cv_20d", "label": "20日换手变异系数", "dimension": "流动性与资金流", "direction": -1},
 ]
 
 ALL_FACTOR_NAMES: list[str] = [str(f["name"]) for f in FACTOR_DEFINITIONS]

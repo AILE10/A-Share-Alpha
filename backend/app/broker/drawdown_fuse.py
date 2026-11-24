@@ -30,7 +30,7 @@ class DrawdownFuseConfig:
     warn_exposure_mult: float = 0.50     # Halve target exposure & single-stock cap during WARNING (matches RiskMiddleware)
     warn_release_ratio: float = 0.60     # Exit WARNING when rolling control_dd > -warn_pct * 0.60 (-4.8%)
     halt_cooldown_days: int = 20         # Minimum trading days in HALTED before resuming
-    rolling_peak_days: int = 120         # Trailing 120-day (~6m) high-watermark window (0 = legacy all-time peak)
+    rolling_peak_days: int = 90          # Trailing 90-day (~4.5m) high-watermark window (0 = legacy all-time peak)
     warn_stable_days: int = 0            # Optional stabilization release (0 = rely cleanly on rolling_peak_days)
     warn_ma_days: int = 20               # Trailing MA window when warn_stable_days > 0
 
@@ -39,7 +39,7 @@ def compute_rolling_peak(
     daily_equities: list[float],
     current_equity: float,
     stored_peak: float,
-    window_days: int = 120,
+    window_days: int = 90,
 ) -> float:
     """Compute control-loop rolling peak equity shared with PaperBrokerAdapter.
 

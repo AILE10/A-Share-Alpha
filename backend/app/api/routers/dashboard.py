@@ -314,7 +314,7 @@ def trigger_data_sync(req: SyncRequest) -> dict:
                 svc.sync_index(start - timedelta(days=120), end)
                 _emit("syncing real capital flow (EM push2his + bulk snapshot)", 0.86)
                 svc.sync_capital_flow(codes, rep, workers=min(6, max(2, req.workers)), resume=True, include_today_bulk=True)
-                _emit("recomputing 17 factors & market regime", 0.92)
+                _emit("recomputing 20 factors & market regime", 0.92)
                 eng = FactorEngine(svc.db)
                 f_run = eng.build(codes=None)
                 eng.persist(f_run)

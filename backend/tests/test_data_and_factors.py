@@ -141,10 +141,11 @@ class TestUniverse:
 
 # --------------------------------------------------------------------------- factors
 class TestFactors:
-    def test_all_17_factors_present(self, factor_run):
+    def test_all_20_factors_present(self, factor_run):
         assert set(factor_run.factors.raw) == set(ALL_FACTOR_NAMES)
-        assert len(ALL_FACTOR_NAMES) == 17
-        assert "turn_cv_20d" in factor_run.factors.raw
+        assert len(ALL_FACTOR_NAMES) == 20
+        for nm in ("turn_cv_20d", "turn_ratio_5_20", "smart_intra_minus_on_20d", "high_120d_prox"):
+            assert nm in factor_run.factors.raw
 
     def test_factor_formulas_on_real_prices(self, real_panel, factor_run):
         p = real_panel
@@ -251,8 +252,8 @@ class TestPipeline:
 class TestAnalytics:
     def test_ic_summary_complete(self, factor_run):
         s = factor_run.analysis.summary
-        assert len(s) == len(ALL_FACTOR_NAMES) == 17
-        assert s["rank_ic_mean"].notna().sum() >= 12
+        assert len(s) == len(ALL_FACTOR_NAMES) == 20
+        assert s["rank_ic_mean"].notna().sum() >= 15
         assert s["rank_ic_mean"].abs().max() < 0.6     # sanity: real cross-sectional IC magnitude
 
     def test_quintile_nav_and_correlation(self, factor_run):
@@ -260,6 +261,6 @@ class TestAnalytics:
         assert list(nav.columns) == ["Q1", "Q2", "Q3", "Q4", "Q5", "LS"]
         assert (nav > 0).all().all()
         corr = factor_run.analysis.correlation
-        assert corr.shape == (len(ALL_FACTOR_NAMES), len(ALL_FACTOR_NAMES)) == (17, 17)
+        assert corr.shape == (len(ALL_FACTOR_NAMES), len(ALL_FACTOR_NAMES)) == (20, 20)
         valid = [n for n in corr.index if corr.loc[n, n] != 0]
         assert np.allclose(np.diag(corr.loc[valid, valid]), 1.0)

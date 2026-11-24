@@ -195,7 +195,7 @@ class AlphaStrategyService:
             factor_cache_hit = True
             _emit(f"命中全市场 {len(f_run.panel.codes)} 只股票因子与技术面缓存 (秒级跳过)", 0.22)
         else:
-            _emit("正在加载全市场行情面板并计算四维 17 因子与中性化...", 0.06)
+            _emit("正在加载全市场行情面板并计算四维 20 因子与中性化...", 0.06)
             f_engine = FactorEngine(self.db)
             f_run = f_engine.build(
                 codes=codes,

@@ -72,7 +72,7 @@ class BacktestConfig:
     drawdown_warn_pct: float = 0.08
     drawdown_halt_pct: float = 0.12
     warn_exposure_mult: float = 0.50
-    rolling_peak_days: int = 120
+    rolling_peak_days: int = 90
     warn_stable_days: int = 0
     halt_cooldown_days: int = 20
     enable_regime_timing: bool = True

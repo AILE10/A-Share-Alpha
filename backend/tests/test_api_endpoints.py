@@ -49,10 +49,10 @@ def test_core_routers_on_real_data(real_db, sample_codes):
     assert "risk_watermarks" in dash
 
     fac = factors.get_factors_summary(horizon=5, decay_window=20)
-    assert len(fac["factors"]) == len(ALL_FACTOR_NAMES) == 17
+    assert len(fac["factors"]) == len(ALL_FACTOR_NAMES) == 20
 
     corr = factors.get_factor_correlation()
-    assert len(corr["matrix"]) == len(ALL_FACTOR_NAMES) == 17
+    assert len(corr["matrix"]) == len(ALL_FACTOR_NAMES) == 20
 
     detail = factors.get_factor_detail("amihud_20d", horizon=5)
     assert len(detail["quintile_nav"]) > 0
