@@ -1013,7 +1013,11 @@ class DataSyncService:
     # ------------------------------------------------------------------ high level
     def incremental_sync(self, ts_codes: list[str] | None = None, lookback_days: int = 10, workers: int = 4) -> SyncReport:
         """Incremental post-close sync from last stored date across ALL synced stocks in DuckDB."""
-        end = today_cn()
+        from app.core.calendar import now_cn
+
+        now = now_cn()
+        # Before 15:15 CN market close, cap daily bar sync at yesterday to avoid partial intraday bars
+        end = (now.date() - timedelta(days=1)) if (now.hour < 15 or (now.hour == 15 and now.minute < 15)) else now.date()
         if ts_codes is None:
             ts_codes = self.db.query_df("SELECT DISTINCT ts_code FROM daily_bars")["ts_code"].tolist()
         last = self.db.query_scalar("SELECT MAX(trade_date) FROM daily_bars")

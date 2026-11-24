@@ -279,6 +279,11 @@ def trigger_data_sync(req: SyncRequest) -> dict:
                 )
             else:
                 rep = svc.incremental_sync(workers=req.workers)
+                _emit("recomputing market regime & latest factors", 0.90)
+                eng = FactorEngine(svc.db)
+                f_run = eng.build(codes=None, compute_analysis=True)
+                eng.persist(f_run)
+                persist_market_regime(compute_market_regime(f_run.panel), svc.db)
                 ws_manager.broadcast_threadsafe(
                     "task_progress",
                     {"task_id": task_id, "mode": req.mode, "stage": "done", "pct": 1.0, "report": rep.to_dict()},
