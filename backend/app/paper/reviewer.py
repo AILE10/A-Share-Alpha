@@ -83,9 +83,9 @@ class WeeklyReviewEngine:
         # 2) Theoretical backtest return over the same recent trading window
         theory_bt_ret = 0.0
         try:
-            f_run = FactorEngine(self.db).build()
-            fwd_ex = forward_excess_returns(f_run.panel, horizon=5)
-            ml_res = LGBMScorer(LGBMConfig(mode="lambdarank")).run_walk_forward(
+            f_run = FactorEngine(self.db).build(horizon=10)
+            fwd_ex = forward_excess_returns(f_run.panel, horizon=10)
+            ml_res = LGBMScorer(LGBMConfig(mode="regression", label_horizon=10, embargo_days=10)).run_walk_forward(
                 f_run.std, fwd_ex, f_run.universe.eligible, adaptive=True
             )
             tech = compute_technical_signals(f_run.panel)

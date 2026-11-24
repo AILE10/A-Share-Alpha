@@ -39,7 +39,9 @@ class BacktestRunRequest(BaseModel):
     name: str = "A-Share Alpha 全市场回测"
     start_date: date | None = None
     end_date: date | None = None
-    model_mode: str = Field(default="lambdarank", pattern="^(lambdarank|regression)$")
+    model_mode: str = Field(default="regression", pattern="^(lambdarank|regression)$")
+    label_horizon: int = Field(default=10, ge=5, le=20)
+    ensemble_seeds_count: int = Field(default=3, ge=1, le=5)
     weight_method: str = Field(default="risk_parity", pattern="^(risk_parity|equal_weight)$")
     holding_mode: str = Field(default="dynamic", pattern="^(dynamic|fixed)$")
     rebalance_days: int = Field(default=10, ge=1, le=20)
@@ -66,7 +68,7 @@ class BacktestRunRequest(BaseModel):
 class WalkForwardOptRequest(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
-    model_mode: str = "lambdarank"
+    model_mode: str = "regression"
     weight_method: str = "risk_parity"
     x_param: str = "rebalance_days"
     x_values: list[int | float] = [3, 5, 10]
@@ -81,7 +83,15 @@ def _sample_codes() -> list[str] | None:
 
 
 def _build_configs(req: BacktestRunRequest) -> tuple[LGBMConfig, BacktestConfig]:
-    lgbm_cfg = LGBMConfig(mode=req.model_mode, label_horizon=5, embargo_days=5)  # type: ignore[arg-type]
+    seed_pool = (42, 1024, 2026, 777, 2025)
+    seeds = seed_pool[: max(1, int(req.ensemble_seeds_count))]
+    embargo = max(5, int(req.label_horizon))
+    lgbm_cfg = LGBMConfig(
+        mode=req.model_mode,  # type: ignore[arg-type]
+        label_horizon=req.label_horizon,
+        embargo_days=embargo,
+        ensemble_seeds=seeds,
+    )
     bt_cfg = BacktestConfig(
         holding_mode=req.holding_mode,  # type: ignore[arg-type]
         rebalance_days=req.rebalance_days,

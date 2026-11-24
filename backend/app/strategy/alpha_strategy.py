@@ -181,6 +181,7 @@ class AlphaStrategyService:
             l_cfg.embargo_days,
             l_cfg.train_window,
             l_cfg.test_window,
+            l_cfg.effective_seeds(),
             tuple(l_cfg.feature_names),
         )
 

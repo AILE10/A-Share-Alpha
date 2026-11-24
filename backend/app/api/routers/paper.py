@@ -20,8 +20,8 @@ router = APIRouter(tags=["Paper Trading, Review & Models"])
 
 
 class RetrainRequest(BaseModel):
-    model_type: str = "lambdarank"
-    notes: str = "工作台一键滚动重训"
+    model_type: str = "regression"
+    notes: str = "工作台一键滚动重训 (Huber 10d · 3-Seed Bagging)"
 
 
 class RebalanceRequest(BaseModel):

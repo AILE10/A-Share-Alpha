@@ -56,6 +56,7 @@ def compute_technical_signals(
     panel: MarketPanel,
     max_3d_return: float = 0.20,
     div_lookback: int = 25,
+    require_trend: bool = False,
 ) -> TechnicalResult:
     hc = panel.hfq_close
     ho = panel.hfq_open
@@ -121,8 +122,16 @@ def compute_technical_signals(
     atr_hfq = tr_df.rolling(14, min_periods=10).mean()
     atr_raw = atr_hfq / panel.adj.replace(0, np.nan)
 
+    # Anti-Chase technical guard (default require_trend=False):
+    # Blocks 3-day overheated chasing (>20%) and MACD bearish top divergence without
+    # conflicting with short-term reversal pullbacks (rev_5d / price_pct_60d) below MA20.
+    # All trend indicators (above_ma20 / bull_ma / pullback_vol / macd_golden) remain
+    # computed for UI explainability tags and Dynamic Holding profit-ride checks.
     trend_ok = above_ma20 | bull_ma | pullback_vol
-    passed = trend_ok & (~overheated) & (~macd_top_div)
+    if require_trend:
+        passed = trend_ok & (~overheated) & (~macd_top_div)
+    else:
+        passed = (~overheated) & (~macd_top_div)
 
     return TechnicalResult(
         passed=passed,

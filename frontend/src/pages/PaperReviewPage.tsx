@@ -18,7 +18,7 @@ export const PaperReviewPage: React.FC = () => {
   const [jobs, setJobs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string>('');
-  const [retrainMode, setRetrainMode] = useState<string>('lambdarank');
+  const [retrainMode, setRetrainMode] = useState<string>('regression');
   const [resetOpen, setResetOpen] = useState(false);
   const [resetCash, setResetCash] = useState<number>(300000);
 
@@ -300,17 +300,17 @@ export const PaperReviewPage: React.FC = () => {
                 <div className="space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded bg-[#0F1624] border border-slate-800">
                     <div className="text-xs text-slate-300">
-                      一键滚动重训将严格执行 <b>Purged Walk-Forward (Embargo ≥ 5日)</b> 并落盘新版本快照，支持随时无损回滚至任意历史版本。
+                      一键滚动重训将严格执行 <b>Purged Walk-Forward (10日标签 · Embargo ≥ 10日 · 3-Seed Bagging)</b> 并落盘新版本快照，支持随时无损回滚至任意历史版本。
                     </div>
                     <div className="flex items-center gap-2">
                       <Select
                         size="small"
                         value={retrainMode}
                         onChange={setRetrainMode}
-                        style={{ width: 160 }}
+                        style={{ width: 175 }}
                         options={[
+                          { value: 'regression', label: 'Huber 回归 (推荐)' },
                           { value: 'lambdarank', label: 'LambdaRank 排序' },
-                          { value: 'regression', label: 'Huber 回归模式' },
                         ]}
                       />
                       <Button

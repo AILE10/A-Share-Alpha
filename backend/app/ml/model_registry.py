@@ -18,7 +18,7 @@ from app.db.models import ModelVersion
 from app.db.sqlite_client import SQLiteDatabase, get_sqlite_db
 from app.factors.definitions import forward_excess_returns
 from app.factors.service import FactorEngine, to_jsonable
-from app.ml.lgbm_scorer import LGBMConfig, LGBMScorer, WalkForwardMLResult
+from app.ml.lgbm_scorer import DEFAULT_ENSEMBLE_SEEDS, EnsembleBooster, LGBMConfig, LGBMScorer, WalkForwardMLResult
 
 logger = get_logger(__name__)
 
@@ -39,8 +39,8 @@ class ModelRegistry:
     def save_version(
         self,
         ml_result: WalkForwardMLResult,
-        model_type: str = "lambdarank",
-        embargo_days: int = 5,
+        model_type: str = "regression",
+        embargo_days: int = 10,
         activate: bool = True,
         notes: str = "",
         version_id: str | None = None,
@@ -53,6 +53,15 @@ class ModelRegistry:
         model_path = vdir / "model.txt"
         ml_result.latest_booster.save_model(str(model_path))
 
+        ensemble_files: list[str] = []
+        ensemble_seeds: list[int] = list(getattr(ml_result, "ensemble_seeds", (42,)))
+        if isinstance(ml_result.latest_booster, EnsembleBooster) and len(ml_result.latest_booster.boosters) > 1:
+            ensemble_seeds = list(ml_result.latest_booster.seeds)
+            for idx, b_member in enumerate(ml_result.latest_booster.boosters):
+                fname = f"model_seed_{idx}.txt"
+                b_member.save_model(str(vdir / fname))
+                ensemble_files.append(fname)
+
         meta_path = vdir / "metadata.json"
         meta_path.write_text(
             json.dumps(
@@ -62,6 +71,9 @@ class ModelRegistry:
                     "train_start": ml_result.latest_train_range[0],
                     "train_end": ml_result.latest_train_range[1],
                     "embargo_days": embargo_days,
+                    "label_horizon": getattr(ml_result, "label_horizon", 10),
+                    "ensemble_seeds": ensemble_seeds,
+                    "ensemble_files": ensemble_files,
                     "feature_names": ml_result.feature_names,
                     "oos_ic": ml_result.oos_ic_mean,
                     "oos_rank_ic": ml_result.oos_rank_ic_mean,
@@ -122,31 +134,49 @@ class ModelRegistry:
             logger.info("Activated model version %s", version_id)
             return self._row_to_dict(target)
 
-    def load_active_booster(self) -> tuple[lgb.Booster, dict]:
+    def load_active_booster(self) -> tuple[lgb.Booster | EnsembleBooster, dict]:
         meta = self.get_active()
         if meta is None:
             raise FileNotFoundError("No trained model version found in registry; run retrain first.")
-        booster = LGBMScorer.load(meta["artifact_path"])
+        artifact = Path(meta["artifact_path"])
+        meta_file = artifact.parent / "metadata.json"
+        if meta_file.exists():
+            try:
+                disk_meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                ens_files = disk_meta.get("ensemble_files") or []
+                if len(ens_files) > 1 and all((artifact.parent / fn).exists() for fn in ens_files):
+                    boosters = [LGBMScorer.load(artifact.parent / fn) for fn in ens_files]
+                    seeds = disk_meta.get("ensemble_seeds") or list(range(len(boosters)))
+                    return EnsembleBooster(boosters, seeds=seeds), meta
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to load ensemble members for %s; falling back to primary model.txt", artifact)
+        booster = LGBMScorer.load(artifact)
         return booster, meta
 
     def retrain_and_register(
         self,
         codes: list[str] | None = None,
-        model_type: str = "lambdarank",
+        model_type: str = "regression",
         feature_names: list[str] | None = None,
         notes: str = "一键滚动重训",
         duckdb_client: DuckDBClient | None = None,
+        label_horizon: int = 10,
+        ensemble_seeds: tuple[int, ...] = DEFAULT_ENSEMBLE_SEEDS,
     ) -> tuple[dict, WalkForwardMLResult]:
         db = duckdb_client or get_duckdb()
-        f_run = FactorEngine(db).build(codes=codes)
-        fwd_ex = forward_excess_returns(f_run.panel, horizon=5)
+        f_run = FactorEngine(db).build(codes=codes, horizon=label_horizon)
+        fwd_ex = forward_excess_returns(f_run.panel, horizon=label_horizon)
+        embargo = max(5, int(label_horizon))
         cfg = LGBMConfig(
             mode=model_type,  # type: ignore[arg-type]
+            label_horizon=label_horizon,
+            embargo_days=embargo,
+            ensemble_seeds=ensemble_seeds,
             feature_names=feature_names if feature_names else list(f_run.std.keys()),
         )
         scorer = LGBMScorer(cfg)
         ml_res = scorer.run_walk_forward(f_run.std, fwd_ex, f_run.universe.eligible, adaptive=True)
-        saved = self.save_version(ml_res, model_type=model_type, embargo_days=cfg.embargo_days, activate=True, notes=notes)
+        saved = self.save_version(ml_res, model_type=model_type, embargo_days=embargo, activate=True, notes=notes)
         return saved, ml_res
 
     @staticmethod

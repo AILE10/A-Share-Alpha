@@ -62,11 +62,11 @@ class RecommendationEngine:
             logger.info("No active model in registry yet; training initial production LightGBM snapshot")
             meta, _ = self.registry.retrain_and_register(
                 codes=codes,
-                model_type="lambdarank",
-                notes="首次初始化训练快照",
+                model_type="regression",
+                notes="首次初始化训练快照 (Huber 10d · 3-Seed Bagging)",
                 duckdb_client=self.db,
             )
-            return LGBMScorer.load(meta["artifact_path"]), meta
+            return self.registry.load_active_booster()
 
     def generate(
         self,

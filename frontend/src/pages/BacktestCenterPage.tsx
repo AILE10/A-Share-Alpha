@@ -35,10 +35,10 @@ interface RunningJobState {
 
 const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
   {
-    label: '最优动态持有(推荐)',
+    label: '最优动态+Huber10日(推荐)',
     values: {
-      name: '最优动态持有-LambdaRank+风险平价',
-      model_mode: 'lambdarank',
+      name: '最优动态持有-Huber10日Bag3+防追高',
+      model_mode: 'regression',
       weight_method: 'risk_parity',
       holding_mode: 'dynamic',
       min_hold_days: 10,
@@ -59,10 +59,10 @@ const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
     },
   },
   {
-    label: '动态+Huber回归(推荐)',
+    label: '对照:LambdaRank排序',
     values: {
-      name: '最优动态持有-Huber回归+风险平价',
-      model_mode: 'regression',
+      name: '对照实验-LambdaRank10日Bag3+风险平价',
+      model_mode: 'lambdarank',
       weight_method: 'risk_parity',
       holding_mode: 'dynamic',
       min_hold_days: 10,
@@ -522,10 +522,10 @@ export const BacktestCenterPage: React.FC = () => {
             layout="vertical"
             size="small"
             initialValues={{
-              name: '最优动态持有-LambdaRank(25年1月至今)',
+              name: '最优动态持有-Huber10日Bag3(25年1月至今)',
               start_date: '2025-01-01',
               end_date: '',
-              model_mode: 'lambdarank',
+              model_mode: 'regression',
               weight_method: 'risk_parity',
               holding_mode: 'dynamic',
               rebalance_days: 10,
@@ -585,8 +585,8 @@ export const BacktestCenterPage: React.FC = () => {
                 ]}
               />
             </Form.Item>
-            <Form.Item name="model_mode" label="LightGBM 模式">
-              <Select options={[{ value: 'lambdarank', label: 'LambdaRank 截面排序' }, { value: 'regression', label: 'Huber 回归打分' }]} />
+            <Form.Item name="model_mode" label="LightGBM 模式 (10日预测 · 3-Seed Bagging)">
+              <Select options={[{ value: 'regression', label: 'Huber 回归打分 (推荐 · 消除尾部过拟合)' }, { value: 'lambdarank', label: 'LambdaRank 截面排序 (对照)' }]} />
             </Form.Item>
             <Form.Item name="weight_method" label="组合优化权重">
               <Select options={[{ value: 'risk_parity', label: '风险平价 (Risk Parity)' }, { value: 'equal_weight', label: '等权组合 (Equal Weight)' }]} />
@@ -662,7 +662,12 @@ export const BacktestCenterPage: React.FC = () => {
               <Form.Item name="enable_regime_timing" label="大盘择时" valuePropName="checked" className="mb-0">
                 <Switch size="small" />
               </Form.Item>
-              <Form.Item name="enable_technical_filter" label="技术共振" valuePropName="checked" className="mb-0">
+              <Form.Item
+                name="enable_technical_filter"
+                label={<Tooltip title="剔除近3日涨幅>20%过热与MACD顶背离，不误杀低位短期回调反转股">防追高过滤</Tooltip>}
+                valuePropName="checked"
+                className="mb-0"
+              >
                 <Switch size="small" />
               </Form.Item>
               <Form.Item name="include_heatmap" label="3×3热力图" valuePropName="checked" className="mb-0">

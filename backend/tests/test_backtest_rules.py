@@ -344,3 +344,57 @@ class TestRealDataBacktestIntegration:
         # 5) Live paper helper parity: <120 rows keeps stored_peak; >=120 rows ages out ancient spike
         assert compute_rolling_peak([123.0] + [110.0] * 50, 111.0, 123.0, window_days=120) == pytest.approx(123.0)
         assert compute_rolling_peak([123.0] + [110.0] * 120, 111.0, 123.0, window_days=120) == pytest.approx(111.0)
+
+    def test_huber_10d_bag3_ensemble_and_antichase_guard(self, factor_run, tmp_path):
+        from app.db.sqlite_client import SQLiteDatabase
+        from app.ml.lgbm_scorer import EnsembleBooster
+        from app.ml.model_registry import ModelRegistry
+
+        # 1) Anti-Chase guard: default require_trend=False blocks overheated & macd_top_div
+        #    while NOT discarding healthy below-MA20 pullback stocks
+        tech_ac = compute_technical_signals(factor_run.panel)
+        tech_tr = compute_technical_signals(factor_run.panel, require_trend=True)
+        assert not (tech_ac.passed & tech_ac.overheated).any().any()
+        assert not (tech_ac.passed & tech_ac.macd_top_div).any().any()
+        assert tech_ac.passed.sum().sum() >= tech_tr.passed.sum().sum()
+
+        # 2) Default Huber 10d + 3-Seed Bagging + strict embargo >= 10 zero look-ahead
+        fwd_ex10 = forward_excess_returns(factor_run.panel, horizon=10)
+        cfg = LGBMConfig(n_estimators=30)
+        assert cfg.mode == "regression"
+        assert cfg.label_horizon == 10
+        assert cfg.embargo_days >= 10
+        assert len(cfg.effective_seeds()) == 3
+
+        scorer = LGBMScorer(cfg)
+        ml = scorer.run_walk_forward(factor_run.std, fwd_ex10, factor_run.universe.eligible, adaptive=True)
+        assert isinstance(ml.latest_booster, EnsembleBooster)
+        assert len(ml.latest_booster.boosters) == 3
+        assert all(f["embargo_days"] >= 10 for f in ml.folds)
+        first_oos = pd.Timestamp(ml.folds[0]["test_start"])
+        assert ml.oos_scores.loc[ml.oos_scores.index < first_oos].isna().all().all()
+
+        # 3) ModelRegistry save & reload preserves full 3-seed EnsembleBooster & identical predictions/SHAP
+        sqlite = SQLiteDatabase(tmp_path / "reg_test.db")
+        sqlite.init_schema()
+        reg = ModelRegistry(sqlite_db=sqlite, models_dir=tmp_path / "models")
+        saved = reg.save_version(ml, model_type="regression", embargo_days=10, activate=True, notes="bag3 test")
+        loaded_booster, meta = reg.load_active_booster()
+        assert meta["version_id"] == saved["version_id"]
+        assert isinstance(loaded_booster, EnsembleBooster)
+        assert len(loaded_booster.boosters) == 3
+
+        from app.ml.lgbm_scorer import build_ml_dataset
+
+        last_dt = factor_run.panel.dates[-1]
+        latest_df = build_ml_dataset(
+            factor_run.std,
+            factor_run.universe.eligible,
+            fwd_excess=None,
+            feature_names=cfg.feature_names,
+            dates_filter=pd.DatetimeIndex([last_dt]),
+        )
+        s1, sh1 = scorer.predict_with_shap(latest_df, ml.latest_booster)
+        s2, sh2 = scorer.predict_with_shap(latest_df, loaded_booster)
+        np.testing.assert_allclose(s1, s2, atol=1e-6)
+        np.testing.assert_allclose(sh1.to_numpy(), sh2.to_numpy(), atol=1e-6)
