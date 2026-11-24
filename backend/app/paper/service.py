@@ -202,6 +202,19 @@ class PaperTradingService:
 
         state = self.gateway.paper.get_account_state(account_id)
         self.record_daily_nav(account_id)
+
+        # Also refresh full-market real-time Market Regime if stale (>90s) during live refresh
+        realtime_regime = None
+        try:
+            from app.strategy.realtime_regime import get_realtime_regime_service
+
+            rt_svc = get_realtime_regime_service()
+            realtime_regime = rt_svc.get_cached(max_age_seconds=90.0)
+            if realtime_regime is None:
+                realtime_regime = rt_svc.refresh(db=self.db, broadcast=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Optional realtime regime refresh skipped during intraday_refresh: %s", exc)
+
         ws_manager.broadcast_threadsafe("paper_nav", to_jsonable({**state["account"], "stop_alerts": stop_alerts}))
         if stop_alerts:
             ws_manager.broadcast_threadsafe("risk_alert", {"type": "STOP_LOSS_TRIGGERED", "alerts": stop_alerts})
@@ -211,6 +224,7 @@ class PaperTradingService:
             "account": state["account"],
             "positions": state["positions"],
             "stop_alerts": stop_alerts,
+            "realtime_regime": realtime_regime,
         }
 
     def run_rebalance(

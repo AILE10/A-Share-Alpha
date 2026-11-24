@@ -24,6 +24,38 @@ class RegimeConfig:
     extreme_drop_5d: float = -0.08
 
 
+def classify_regime_point(
+    close: float,
+    ma20: float,
+    ma60: float,
+    breadth: float,
+    ret_5d: float,
+    config: RegimeConfig | None = None,
+) -> tuple[str, float]:
+    """Classify a single point (EOD close or live intraday snapshot) into (regime, target_exposure).
+
+    Shared identically by historical backtest (`compute_market_regime`) and live intraday
+    `RealtimeRegimeService` so backtest & live timing rules never drift.
+    """
+    cfg = config or RegimeConfig()
+    if pd.isna(ma20) or pd.isna(ma60) or pd.isna(close):
+        return ("NEUTRAL", cfg.neutral_exposure)
+
+    b = float(breadth) if pd.notna(breadth) else 0.5
+    r5 = float(ret_5d) if pd.notna(ret_5d) else 0.0
+    extreme_risk = (r5 <= cfg.extreme_drop_5d) or (b < cfg.extreme_breadth)
+    bearish = (close < ma20) and (close < ma60) and (b < cfg.breadth_bear)
+    bullish = (close > ma20) and (close > ma60) and (b >= cfg.breadth_bull)
+
+    if extreme_risk:
+        return ("DEFENSIVE", cfg.extreme_exposure if b >= 0.12 else 0.0)
+    if bearish:
+        return ("DEFENSIVE", cfg.defensive_exposure)
+    if bullish:
+        return ("OFFENSIVE", cfg.offensive_exposure)
+    return ("NEUTRAL", cfg.neutral_exposure)
+
+
 def compute_market_regime(panel: MarketPanel, config: RegimeConfig | None = None) -> pd.DataFrame:
     """Compute daily market regime & target exposure using ONLY information available at day t close."""
     cfg = config or RegimeConfig()
@@ -48,33 +80,16 @@ def compute_market_regime(panel: MarketPanel, config: RegimeConfig | None = None
     regimes = []
     exposures = []
     for dt in dates:
-        c = idx.loc[dt]
-        m20 = ma20.loc[dt]
-        m60 = ma60.loc[dt]
-        b = float(breadth.loc[dt])
-        r5 = float(ret_5d.loc[dt]) if pd.notna(ret_5d.loc[dt]) else 0.0
-
-        if pd.isna(m20) or pd.isna(m60):
-            regimes.append("NEUTRAL")
-            exposures.append(cfg.neutral_exposure)
-            continue
-
-        extreme_risk = (r5 <= cfg.extreme_drop_5d) or (b < cfg.extreme_breadth)
-        bearish = (c < m20) and (c < m60) and (b < cfg.breadth_bear)
-        bullish = (c > m20) and (c > m60) and (b >= cfg.breadth_bull)
-
-        if extreme_risk:
-            regimes.append("DEFENSIVE")
-            exposures.append(cfg.extreme_exposure if b >= 0.12 else 0.0)
-        elif bearish:
-            regimes.append("DEFENSIVE")
-            exposures.append(cfg.defensive_exposure)
-        elif bullish:
-            regimes.append("OFFENSIVE")
-            exposures.append(cfg.offensive_exposure)
-        else:
-            regimes.append("NEUTRAL")
-            exposures.append(cfg.neutral_exposure)
+        reg, exp = classify_regime_point(
+            float(idx.loc[dt]) if pd.notna(idx.loc[dt]) else np.nan,
+            float(ma20.loc[dt]) if pd.notna(ma20.loc[dt]) else np.nan,
+            float(ma60.loc[dt]) if pd.notna(ma60.loc[dt]) else np.nan,
+            float(breadth.loc[dt]),
+            float(ret_5d.loc[dt]) if pd.notna(ret_5d.loc[dt]) else 0.0,
+            cfg,
+        )
+        regimes.append(reg)
+        exposures.append(exp)
 
     return pd.DataFrame(
         {

@@ -83,6 +83,7 @@ def test_scheduler_registers_five_trading_jobs(tmp_path):
         assert ids == {
             "pre_market_unlock",
             "intraday_top100_refresh",
+            "realtime_regime_refresh",
             "rebalance_1440",
             "post_market_sync",
             "weekly_review",

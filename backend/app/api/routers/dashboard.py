@@ -22,6 +22,7 @@ from app.db.models import BacktestRun
 from app.db.sqlite_client import get_sqlite_db
 from app.factors.service import FactorEngine, to_jsonable
 from app.paper.service import PaperTradingService
+from app.strategy.realtime_regime import get_realtime_regime_service
 from app.strategy.regime import compute_market_regime, persist_market_regime
 
 router = APIRouter(tags=["Dashboard & Data"])
@@ -64,6 +65,8 @@ def get_dashboard_summary() -> dict:
             "csi1000_ma20": round(float(latest["csi1000_ma20"]), 2) if pd.notna(latest["csi1000_ma20"]) else None,
             "csi1000_ma60": round(float(latest["csi1000_ma60"]), 2) if pd.notna(latest["csi1000_ma60"]) else None,
             "breadth_above_ma20": round(float(latest["breadth_above_ma20"]), 4),
+            "is_realtime": False,
+            "updated_at": str(pd.to_datetime(latest["trade_date"]).date()),
             "history": [
                 {
                     "date": str(pd.to_datetime(r["trade_date"]).date()),
@@ -84,7 +87,46 @@ def get_dashboard_summary() -> dict:
             "csi1000_ma20": None,
             "csi1000_ma60": None,
             "breadth_above_ma20": None,
+            "is_realtime": False,
+            "updated_at": "",
             "history": [],
+        }
+
+    # Overlay fresh in-memory real-time intraday regime snapshot (zero DuckDB pollution)
+    rt_snap = get_realtime_regime_service().get_cached(max_age_seconds=900.0)
+    if rt_snap and rt_snap.get("trade_date") and rt_snap["trade_date"] >= (regime_card.get("trade_date") or ""):
+        hist = list(regime_card.get("history") or [])
+        rt_point = {
+            "date": rt_snap["trade_date"],
+            "csi1000_close": rt_snap["csi1000_close"],
+            "breadth": rt_snap["breadth_above_ma20"],
+            "regime": rt_snap["regime"],
+            "target_exposure": rt_snap["target_exposure"],
+        }
+        if hist and hist[-1]["date"] == rt_point["date"]:
+            hist[-1] = rt_point
+        else:
+            hist.append(rt_point)
+        regime_card = {
+            **regime_card,
+            "trade_date": rt_snap["trade_date"],
+            "quote_time": rt_snap.get("quote_time", ""),
+            "updated_at": rt_snap.get("updated_at", rt_snap["trade_date"]),
+            "is_realtime": bool(rt_snap.get("is_realtime", True)),
+            "regime": rt_snap["regime"],
+            "target_exposure": float(rt_snap["target_exposure"]),
+            "csi1000_close": rt_snap["csi1000_close"],
+            "csi1000_pct_chg": rt_snap.get("csi1000_pct_chg"),
+            "csi1000_ma20": rt_snap["csi1000_ma20"],
+            "csi1000_ma60": rt_snap["csi1000_ma60"],
+            "ret_5d": rt_snap.get("ret_5d"),
+            "breadth_above_ma20": rt_snap["breadth_above_ma20"],
+            "quoted_count": rt_snap.get("quoted_count"),
+            "universe_count": rt_snap.get("universe_count"),
+            "advancers": rt_snap.get("advancers"),
+            "decliners": rt_snap.get("decliners"),
+            "flat": rt_snap.get("flat"),
+            "history": hist[-60:],
         }
 
     # 2) Paper account, holdings & NAV curve
@@ -111,9 +153,21 @@ def get_dashboard_summary() -> dict:
         if bt is not None:
             latest_bt_curve = json.loads(bt.equity_curve_json or "[]")[-120:]
 
-    # Benchmark index quick snapshot
+    # Benchmark index quick snapshot (overlay realtime index quotes when cached)
     idx_cards = {}
+    rt_indices = (rt_snap or {}).get("indices") or {}
     for code, label in ((BENCHMARK_CSI1000, "中证1000"), (BENCHMARK_CSI300, "沪深300")):
+        if code in rt_indices:
+            rq = rt_indices[code]
+            idx_cards[code] = {
+                "name": label,
+                "trade_date": rq.get("quote_date", ""),
+                "quote_time": rq.get("quote_time", ""),
+                "close": rq["close"],
+                "pct_chg": rq["pct_chg"],
+                "is_realtime": bool((rt_snap or {}).get("is_realtime", True)),
+            }
+            continue
         idf = db.query_df(
             "SELECT trade_date, close, pct_chg FROM index_daily WHERE index_code = ? ORDER BY trade_date DESC LIMIT 2",
             [code],
@@ -125,6 +179,7 @@ def get_dashboard_summary() -> dict:
                 "trade_date": str(pd.to_datetime(r["trade_date"]).date()),
                 "close": round(float(r["close"]), 2),
                 "pct_chg": round(float(r["pct_chg"]), 2) if pd.notna(r["pct_chg"]) else 0.0,
+                "is_realtime": False,
             }
 
     return to_jsonable({
@@ -148,6 +203,18 @@ def get_dashboard_summary() -> dict:
         },
         "ws_clients": ws_manager.active_count,
     })
+
+
+@router.post("/dashboard/regime/refresh")
+def refresh_realtime_regime() -> dict:
+    """Force-refresh exact full-market real-time Market Regime (~2-3s) and broadcast over WebSocket."""
+    from fastapi import HTTPException
+
+    try:
+        snap = get_realtime_regime_service().refresh(db=get_duckdb(), broadcast=True)
+        return to_jsonable(snap)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"实时大盘状态刷新失败: {exc}") from exc
 
 
 @router.get("/data/status")
@@ -252,6 +319,7 @@ def trigger_data_sync(req: SyncRequest) -> dict:
                 f_run = eng.build(codes=None)
                 eng.persist(f_run)
                 persist_market_regime(compute_market_regime(f_run.panel), svc.db)
+                get_realtime_regime_service().clear_cache()
                 ws_manager.broadcast_threadsafe(
                     "task_progress",
                     {
@@ -284,6 +352,7 @@ def trigger_data_sync(req: SyncRequest) -> dict:
                 f_run = eng.build(codes=None, compute_analysis=True)
                 eng.persist(f_run)
                 persist_market_regime(compute_market_regime(f_run.panel), svc.db)
+                get_realtime_regime_service().clear_cache()
                 ws_manager.broadcast_threadsafe(
                     "task_progress",
                     {"task_id": task_id, "mode": req.mode, "stage": "done", "pct": 1.0, "report": rep.to_dict()},

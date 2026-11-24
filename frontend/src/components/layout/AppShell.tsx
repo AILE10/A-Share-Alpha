@@ -7,6 +7,7 @@ import {
   RadarChartOutlined,
   FundProjectionScreenOutlined,
   SafetyCertificateOutlined,
+  SyncOutlined,
   WifiOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -39,6 +40,8 @@ export const AppShell: React.FC<Props> = ({ children }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [regime, setRegime] = useState<string>('NEUTRAL');
   const [targetExp, setTargetExp] = useState<number>(0.55);
+  const [regimeDetail, setRegimeDetail] = useState<any>(null);
+  const [refreshingRegime, setRefreshingRegime] = useState(false);
   const [brokerMode, setBrokerMode] = useState<string>('PAPER');
   const [fuseStatus, setFuseStatus] = useState<string>('NORMAL');
   const [stagedOrder, setStagedOrder] = useState<any | null>(null);
@@ -49,6 +52,7 @@ export const AppShell: React.FC<Props> = ({ children }) => {
     if (evt.channel === 'market_regime' && evt.payload?.regime) {
       setRegime(evt.payload.regime);
       if (evt.payload.target_exposure !== undefined) setTargetExp(evt.payload.target_exposure);
+      setRegimeDetail((prev: any) => ({ ...(prev || {}), ...evt.payload }));
     }
     if (evt.channel === 'paper_nav' && evt.payload?.fuse_status) {
       setFuseStatus(evt.payload.fuse_status);
@@ -71,11 +75,30 @@ export const AppShell: React.FC<Props> = ({ children }) => {
       .then((d) => {
         if (d.regime?.regime) setRegime(d.regime.regime);
         if (d.regime?.target_exposure !== undefined) setTargetExp(d.regime.target_exposure);
+        if (d.regime) setRegimeDetail(d.regime);
         if (d.broker_mode) setBrokerMode(d.broker_mode);
         if (d.risk_watermarks?.fuse_status) setFuseStatus(d.risk_watermarks.fuse_status);
       })
       .catch(() => {});
   }, [location.pathname]);
+
+  const handleRefreshRegime = async () => {
+    if (refreshingRegime) return;
+    setRefreshingRegime(true);
+    try {
+      const snap = await api.refreshRealtimeRegime();
+      if (snap?.regime) setRegime(snap.regime);
+      if (snap?.target_exposure !== undefined) setTargetExp(snap.target_exposure);
+      setRegimeDetail(snap);
+      message.success(
+        `实时大盘已刷新 (${snap.quote_time || snap.trade_date}) · 中证1000 ${snap.csi1000_close} · MA20宽度 ${(snap.breadth_above_ma20 * 100).toFixed(1)}%`
+      );
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '实时大盘状态刷新失败');
+    } finally {
+      setRefreshingRegime(false);
+    }
+  };
 
   const menuItems = [
     { key: '/', icon: <DashboardOutlined />, label: '策略总览与大盘' },
@@ -146,9 +169,57 @@ export const AppShell: React.FC<Props> = ({ children }) => {
             <div className="flex items-center gap-2 text-xs">
               <span className={`w-2.5 h-2.5 rounded-full ${regInfo.dot} shadow-sm`} />
               <span className="text-slate-400">大盘状态:</span>
-              <Tag color={regInfo.color} className="m-0 font-semibold">
-                {regInfo.label} ({Math.round(targetExp * 100)}%)
-              </Tag>
+              <Tooltip
+                title={
+                  regimeDetail ? (
+                    <div className="text-xs space-y-0.5">
+                      <div>
+                        时间: {regimeDetail.updated_at || regimeDetail.trade_date || '-'}{' '}
+                        {regimeDetail.is_realtime ? '(盘中全市场实时)' : '(收盘确认)'}
+                      </div>
+                      <div>
+                        中证1000: {regimeDetail.csi1000_close ?? '-'}
+                        {regimeDetail.csi1000_pct_chg !== undefined && regimeDetail.csi1000_pct_chg !== null
+                          ? ` (${regimeDetail.csi1000_pct_chg >= 0 ? '+' : ''}${Number(regimeDetail.csi1000_pct_chg).toFixed(2)}%)`
+                          : ''}
+                        {' · '}MA20 {regimeDetail.csi1000_ma20 ?? '-'} / MA60 {regimeDetail.csi1000_ma60 ?? '-'}
+                      </div>
+                      <div>
+                        全市场站上MA20宽度:{' '}
+                        {regimeDetail.breadth_above_ma20 !== undefined && regimeDetail.breadth_above_ma20 !== null
+                          ? `${(Number(regimeDetail.breadth_above_ma20) * 100).toFixed(2)}%`
+                          : '-'}
+                        {regimeDetail.quoted_count ? ` (${regimeDetail.quoted_count}股)` : ''}
+                      </div>
+                      {regimeDetail.advancers !== undefined && (
+                        <div>
+                          盘中涨跌: 涨 {regimeDetail.advancers} / 跌 {regimeDetail.decliners}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    '点击右侧图标立即刷新盘中全市场实时大盘状态'
+                  )
+                }
+              >
+                <Tag color={regInfo.color} className="m-0 font-semibold cursor-help">
+                  {regInfo.label} ({Math.round(targetExp * 100)}%)
+                  {regimeDetail?.is_realtime && regimeDetail?.quote_time
+                    ? ` · 实时 ${String(regimeDetail.quote_time).slice(0, 5)}`
+                    : regimeDetail?.trade_date
+                      ? ` · ${String(regimeDetail.trade_date).slice(5)}`
+                      : ''}
+                </Tag>
+              </Tooltip>
+              <Tooltip title="立即拉取全市场 4,100+ 股实时行情刷新大盘状态 (~2秒)">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<SyncOutlined spin={refreshingRegime} className="text-sky-400" />}
+                  onClick={handleRefreshRegime}
+                  className="px-1 h-6 flex items-center"
+                />
+              </Tooltip>
             </div>
             <div className="hidden md:flex items-center gap-2 text-xs">
               <span className="text-slate-400">执行模式:</span>

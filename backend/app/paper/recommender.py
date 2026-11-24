@@ -101,7 +101,32 @@ class RecommendationEngine:
             "csi1000_ma20": round(float(reg_row["csi1000_ma20"]), 2) if pd.notna(reg_row["csi1000_ma20"]) else None,
             "csi1000_ma60": round(float(reg_row["csi1000_ma60"]), 2) if pd.notna(reg_row["csi1000_ma60"]) else None,
             "breadth_above_ma20": round(float(reg_row["breadth_above_ma20"]), 4),
+            "is_realtime": False,
         }
+        # During live 14:40 rebalance / live signal refresh, align target exposure with real-time intraday regime
+        if live_quotes is not None:
+            try:
+                from app.strategy.realtime_regime import get_realtime_regime_service
+
+                rt_svc = get_realtime_regime_service()
+                rt_snap = rt_svc.get_cached(max_age_seconds=120.0) or rt_svc.refresh(db=self.db, broadcast=True)
+                if rt_snap and rt_snap.get("trade_date", "") >= latest_str:
+                    regime_info = {
+                        **regime_info,
+                        "trade_date": rt_snap["trade_date"],
+                        "quote_time": rt_snap.get("quote_time", ""),
+                        "updated_at": rt_snap.get("updated_at", rt_snap["trade_date"]),
+                        "is_realtime": bool(rt_snap.get("is_realtime", True)),
+                        "regime": str(rt_snap["regime"]),
+                        "target_exposure": round(float(rt_snap["target_exposure"]), 4),
+                        "csi1000_close": rt_snap["csi1000_close"],
+                        "csi1000_pct_chg": rt_snap.get("csi1000_pct_chg"),
+                        "csi1000_ma20": rt_snap["csi1000_ma20"],
+                        "csi1000_ma60": rt_snap["csi1000_ma60"],
+                        "breadth_above_ma20": rt_snap["breadth_above_ma20"],
+                    }
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Live realtime regime overlay skipped; falling back to EOD regime: %s", exc)
 
         # Score latest cross-section + exact per-stock TreeSHAP contributions
         latest_df = build_ml_dataset(
@@ -173,8 +198,8 @@ class RecommendationEngine:
                 stop_reasons[code] = f"触发{trail_label}"
 
         base_cfg = portfolio_config or PortfolioConfig(buffer_rank=dyn_cfg.buffer_rank if use_dynamic_holding else 25)
-        target_exp = float(reg_row["target_exposure"])
-        regime_label = str(reg_row["regime"])
+        target_exp = float(regime_info["target_exposure"])
+        regime_label = str(regime_info["regime"])
         eff_holdings = base_cfg.target_holdings
         eligible_for_sel = f_run.universe.eligible.loc[latest_dt].copy()
         if acct_equity > 0 and target_exp > 1e-5:

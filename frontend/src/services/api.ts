@@ -8,6 +8,7 @@ export const http = axios.create({
 export const api = {
   // Dashboard & Data
   getDashboardSummary: () => http.get('/dashboard/summary').then((r) => r.data),
+  refreshRealtimeRegime: () => http.post('/dashboard/regime/refresh').then((r) => r.data),
   getDataStatus: () => http.get('/data/status').then((r) => r.data),
   triggerDataSync: (
     mode: 'incremental' | 'active_market' | 'sample_60' | 'top100_snapshot' = 'incremental',
@@ -60,7 +61,7 @@ export const api = {
   listWeeklyReviews: () => http.get('/paper/reviews').then((r) => r.data),
   generateWeeklyReview: () => http.post('/paper/reviews/generate').then((r) => r.data),
   listModelVersions: () => http.get('/models/versions').then((r) => r.data),
-  retrainModel: (modelType = 'lambdarank', notes = '工作台一键滚动重训') =>
+  retrainModel: (modelType = 'regression', notes = '工作台一键滚动重训') =>
     http.post('/models/retrain', { model_type: modelType, notes }).then((r) => r.data),
   activateModelVersion: (versionId: string) =>
     http.post(`/models/${encodeURIComponent(versionId)}/activate`).then((r) => r.data),

@@ -398,3 +398,36 @@ class TestRealDataBacktestIntegration:
         s2, sh2 = scorer.predict_with_shap(latest_df, loaded_booster)
         np.testing.assert_allclose(s1, s2, atol=1e-6)
         np.testing.assert_allclose(sh1.to_numpy(), sh2.to_numpy(), atol=1e-6)
+
+    def test_realtime_regime_parity_and_baseline_isolation(self, real_db, real_panel):
+        from datetime import timedelta
+
+        from app.strategy.realtime_regime import RealtimeRegimeService
+        from app.strategy.regime import RegimeConfig, classify_regime_point
+
+        cfg = RegimeConfig()
+        reg_df = compute_market_regime(real_panel, cfg)
+        last = reg_df.iloc[-1]
+        # Shared classifier must match compute_market_regime identically
+        idx = real_panel.index_close["000852.SH"].reindex(real_panel.dates).ffill()
+        r5 = float(idx.iloc[-1] / idx.iloc[-6] - 1.0)
+        cls_reg, cls_exp = classify_regime_point(
+            float(last["csi1000_close"]),
+            float(last["csi1000_ma20"]),
+            float(last["csi1000_ma60"]),
+            float(last["breadth_above_ma20"]),
+            r5,
+            cfg,
+        )
+        assert cls_reg == last["regime"]
+        assert cls_exp == pytest.approx(float(last["target_exposure"]))
+
+        # Baseline strictly loads finalized EOD bars < live_quote_date (never double-counts today)
+        svc = RealtimeRegimeService(cfg)
+        last_d = pd.to_datetime(last["trade_date"]).date()
+        base = svc._ensure_baseline(real_db, last_d + timedelta(days=1))
+        assert base.last_eod_date <= last_d
+        assert len(base.codes) > 100
+        assert base.idx_cnt_19 == 19
+        assert base.idx_cnt_59 == 59
+        assert base.idx_close_5d_ago is not None and base.idx_close_5d_ago > 0

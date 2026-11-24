@@ -3,24 +3,31 @@
 Jobs:
   1. 09:26 Mon-Fri: Pre-market T+1 unlock & candidate watchlist prep
   2. 09:30-11:30 & 13:00-14:55 (every N sec): Intraday Top-100 snapshot refresh & stop-loss guard
-  3. 14:40 Mon-Fri: Rebalance signal generation, explainable recommendation push & order execution
-  4. 15:30 Mon-Fri: Post-market incremental DuckDB sync & daily NAV reconciliation
-  5. 16:30 Fri: Weekly review (paper vs theoretical backtest, slippage drag, 20d IC decay alerts)
+  3. 09:30-11:30 & 13:00-15:00 (every 180s): Full-market real-time Market Regime & breadth WebSocket push
+  4. 14:40 Mon-Fri: Rebalance signal generation (with 14:40 live regime), explainable recommendation push & execution
+  5. 15:30 Mon-Fri: Post-market incremental DuckDB sync, EOD regime refresh & daily NAV reconciliation
+  6. 16:30 Fri: Weekly review (paper vs theoretical backtest, slippage drag, 20d IC decay alerts)
 """
 
 from __future__ import annotations
+
+import threading
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from app.api.ws_manager import ws_manager
 from app.config import get_settings
 from app.core.calendar import is_trading_session, today_cn
 from app.core.logging import get_logger
 from app.data.sync_service import DataSyncService
 from app.db.duckdb_client import get_duckdb
+from app.factors.service import FactorEngine, to_jsonable
 from app.paper.reviewer import WeeklyReviewEngine
 from app.paper.service import PaperTradingService
+from app.strategy.realtime_regime import get_realtime_regime_service
+from app.strategy.regime import compute_market_regime, persist_market_regime
 
 logger = get_logger(__name__)
 
@@ -59,6 +66,14 @@ class StudioScheduler:
         except Exception as exc:  # noqa: BLE001
             logger.error("intraday_refresh job failed: %s", exc)
 
+    def _job_realtime_regime(self) -> None:
+        if not (self._is_open_today() and is_trading_session()):
+            return
+        try:
+            get_realtime_regime_service().refresh(db=self.paper.db, broadcast=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("realtime_regime job failed: %s", exc)
+
     def _job_rebalance_1440(self) -> None:
         if not self._is_open_today():
             return
@@ -71,9 +86,32 @@ class StudioScheduler:
         if not self._is_open_today():
             return
         try:
-            svc = DataSyncService()
+            db = get_duckdb()
+            svc = DataSyncService(db)
             try:
                 svc.incremental_sync()
+                eng = FactorEngine(db)
+                f_run = eng.build(codes=None, compute_analysis=True)
+                eng.persist(f_run)
+                reg_df = compute_market_regime(f_run.panel)
+                persist_market_regime(reg_df, db)
+                get_realtime_regime_service().clear_cache()
+                if not reg_df.empty:
+                    last = reg_df.iloc[-1]
+                    ws_manager.broadcast_threadsafe(
+                        "market_regime",
+                        to_jsonable({
+                            "trade_date": str(last["trade_date"]),
+                            "updated_at": str(last["trade_date"]),
+                            "is_realtime": False,
+                            "regime": str(last["regime"]),
+                            "target_exposure": float(last["target_exposure"]),
+                            "csi1000_close": round(float(last["csi1000_close"]), 2),
+                            "csi1000_ma20": round(float(last["csi1000_ma20"]), 2) if last["csi1000_ma20"] == last["csi1000_ma20"] else None,
+                            "csi1000_ma60": round(float(last["csi1000_ma60"]), 2) if last["csi1000_ma60"] == last["csi1000_ma60"] else None,
+                            "breadth_above_ma20": round(float(last["breadth_above_ma20"]), 4),
+                        }),
+                    )
             finally:
                 svc.close()
             self.paper.record_daily_nav()
@@ -102,6 +140,12 @@ class StudioScheduler:
             replace_existing=True,
         )
         self.scheduler.add_job(
+            self._job_realtime_regime,
+            IntervalTrigger(seconds=180),
+            id="realtime_regime_refresh",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
             self._job_rebalance_1440,
             CronTrigger(day_of_week="mon-fri", hour=14, minute=40, timezone="Asia/Shanghai"),
             id="rebalance_1440",
@@ -123,6 +167,9 @@ class StudioScheduler:
             self.scheduler.start()
             self._started = True
             logger.info("StudioScheduler started with %d jobs", len(self.scheduler.get_jobs()))
+            # If started mid-session on a trading day, warm up live Market Regime asynchronously
+            if self._is_open_today() and is_trading_session():
+                threading.Thread(target=self._job_realtime_regime, daemon=True, name="regime_warmup").start()
 
     def list_jobs(self) -> list[dict]:
         return [

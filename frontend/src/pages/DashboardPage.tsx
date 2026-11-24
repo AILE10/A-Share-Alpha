@@ -25,6 +25,35 @@ export const DashboardPage: React.FC = () => {
   };
 
   useAlphaWebSocket((evt) => {
+    if (evt.channel === 'market_regime' && evt.payload?.regime) {
+      setData((prev: any) => {
+        if (!prev) return prev;
+        const p = evt.payload;
+        const hist = Array.isArray(prev.regime?.history) ? [...prev.regime.history] : [];
+        if (p.trade_date && p.csi1000_close !== undefined && p.breadth_above_ma20 !== undefined) {
+          const pt = {
+            date: p.trade_date,
+            csi1000_close: p.csi1000_close,
+            breadth: p.breadth_above_ma20,
+            regime: p.regime,
+            target_exposure: p.target_exposure,
+          };
+          if (hist.length && hist[hist.length - 1].date === pt.date) {
+            hist[hist.length - 1] = pt;
+          } else {
+            hist.push(pt);
+          }
+        }
+        return {
+          ...prev,
+          regime: {
+            ...(prev.regime || {}),
+            ...p,
+            history: hist.slice(-60),
+          },
+        };
+      });
+    }
     if (evt.channel === 'task_progress' && evt.payload?.mode === 'active_market') {
       if (evt.payload.stage === 'done') {
         setSyncTask(null);
@@ -236,7 +265,7 @@ export const DashboardPage: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-slate-100 m-0">策略总览与大盘状态仪表盘</h1>
           <div className="text-xs text-slate-400 mt-0.5">
-            默认策略：中小盘多因子增强 + LightGBM 截面排序 + 技术面共振与中证1000择时 · DuckDB 实盘库 {dataStatus?.stocks_synced ?? 0} 只真股 ({dataStatus?.date_range?.[0]} ~ {dataStatus?.date_range?.[1]})
+            默认策略：17 因子增强 + Huber 10日 3-Seed Bagging + 防追高过滤与中证1000实时择时 · DuckDB 实盘库 {dataStatus?.stocks_synced ?? 0} 只真股 ({dataStatus?.date_range?.[0]} ~ {dataStatus?.date_range?.[1]})
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -289,14 +318,37 @@ export const DashboardPage: React.FC = () => {
         </div>
 
         <div className="quant-card p-4">
-          <div className="text-xs text-slate-400">大盘 Regime 择时信号 ({reg.trade_date || '-'})</div>
+          <div className="flex items-center justify-between text-xs text-slate-400">
+            <span>大盘 Regime 择时 ({reg.trade_date || '-'})</span>
+            <Tag color={reg.is_realtime ? 'processing' : 'default'} className="m-0 text-[10px] leading-4 px-1.5">
+              {reg.is_realtime ? `盘中实时 ${reg.quote_time || ''}` : '收盘确认'}
+            </Tag>
+          </div>
           <div className={`text-2xl font-bold mt-1 ${regimeColorClass}`}>
             {regimeCn} · 目标 {Math.round((reg.target_exposure || 0) * 100)}%
           </div>
           <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
-            <span>中证1000 <b className="num text-slate-200">{fmtNum(reg.csi1000_close)}</b></span>
-            <span>MA20宽度 <b className="num text-amber-400">{reg.breadth_above_ma20 !== null ? `${(reg.breadth_above_ma20 * 100).toFixed(1)}%` : '-'}</b></span>
+            <span>
+              中证1000 <b className="num text-slate-200">{fmtNum(reg.csi1000_close)}</b>
+              {reg.csi1000_pct_chg !== undefined && reg.csi1000_pct_chg !== null && (
+                <span className={`num ml-1 ${aShareColor(reg.csi1000_pct_chg)}`}>
+                  {reg.csi1000_pct_chg >= 0 ? '+' : ''}
+                  {Number(reg.csi1000_pct_chg).toFixed(2)}%
+                </span>
+              )}
+            </span>
+            <span>
+              MA20宽度 <b className="num text-amber-400">{reg.breadth_above_ma20 !== null && reg.breadth_above_ma20 !== undefined ? `${(reg.breadth_above_ma20 * 100).toFixed(2)}%` : '-'}</b>
+            </span>
           </div>
+          {reg.advancers !== undefined && reg.decliners !== undefined && (
+            <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500">
+              <span>
+                涨 <b className="num text-rose-400">{reg.advancers}</b> / 跌 <b className="num text-emerald-400">{reg.decliners}</b>
+              </span>
+              <span>已采样 {reg.quoted_count ?? '-'} 股</span>
+            </div>
+          )}
         </div>
 
         <div className="quant-card p-4">
