@@ -265,7 +265,7 @@ export const DashboardPage: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-slate-100 m-0">策略总览与大盘状态仪表盘</h1>
           <div className="text-xs text-slate-400 mt-0.5">
-            默认策略：20 因子增强 + Huber 10日 3-Seed Bagging + 防追高过滤与金叉顶部保护实时择时 · DuckDB 实盘库 {dataStatus?.stocks_synced ?? 0} 只真股 ({dataStatus?.date_range?.[0]} ~ {dataStatus?.date_range?.[1]})
+            默认策略：20 因子增强 + Huber 10日 3-Seed Bagging + 双指数二八分化大中盘择时 + 2.5元面值退市防线 · DuckDB 实盘库 {dataStatus?.stocks_synced ?? 0} 只真股 ({dataStatus?.date_range?.[0]} ~ {dataStatus?.date_range?.[1]})
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -315,14 +315,26 @@ export const DashboardPage: React.FC = () => {
             <span className="text-slate-400">现金 ¥{fmtNum(acct.cash)}</span>
             <span className="num text-slate-300">{positions.length} 只持股</span>
           </div>
+          {acct.total_equity > 0 && acct.cash / acct.total_equity >= 0.2 && (
+            <div className="mt-1 text-[11px] text-amber-300/90">
+              闲置现金 {((acct.cash / acct.total_equity) * 100).toFixed(0)}% · 实盘可停泊货币ETF/逆回购增厚
+            </div>
+          )}
         </div>
 
         <div className="quant-card p-4">
-          <div className="flex items-center justify-between text-xs text-slate-400">
+          <div className="flex items-center justify-between gap-1 text-xs text-slate-400">
             <span>大盘 Regime 择时 ({reg.trade_date || '-'})</span>
-            <Tag color={reg.is_realtime ? 'processing' : 'default'} className="m-0 text-[10px] leading-4 px-1.5">
-              {reg.is_realtime ? `盘中实时 ${reg.quote_time || ''}` : '收盘确认'}
-            </Tag>
+            <div className="flex items-center gap-1">
+              {reg.style_mode === 'LARGE_CAP_RESCUE' && (
+                <Tag color="purple" className="m-0 text-[10px] leading-4 px-1.5">
+                  二八分化·切大中盘
+                </Tag>
+              )}
+              <Tag color={reg.is_realtime ? 'processing' : 'default'} className="m-0 text-[10px] leading-4 px-1.5">
+                {reg.is_realtime ? `盘中实时 ${reg.quote_time || ''}` : '收盘确认'}
+              </Tag>
+            </div>
           </div>
           <div className={`text-2xl font-bold mt-1 ${regimeColorClass}`}>
             {regimeCn} · 目标 {Math.round((reg.target_exposure || 0) * 100)}%

@@ -12,7 +12,7 @@ import pandas as pd
 
 from app.api.ws_manager import ws_manager
 from app.core.calendar import today_cn
-from app.core.constants import ALL_FACTOR_NAMES, FACTOR_META_MAP
+from app.core.constants import ALL_FACTOR_NAMES, DEFAULT_MIN_PRICE, FACTOR_META_MAP
 from app.core.logging import get_logger
 from app.db.duckdb_client import DuckDBClient, get_duckdb
 from app.db.models import PaperAccount, PaperOrder, PaperPosition, SignalRecommendation
@@ -97,9 +97,12 @@ class RecommendationEngine:
             "trade_date": latest_str,
             "regime": str(reg_row["regime"]),
             "target_exposure": round(float(reg_row["target_exposure"]), 4),
+            "style_mode": str(reg_row["style_mode"]) if ("style_mode" in reg_row.index and pd.notna(reg_row["style_mode"])) else "ALL_CAP",
+            "min_mcap_quantile": float(reg_row["min_mcap_quantile"]) if ("min_mcap_quantile" in reg_row.index and pd.notna(reg_row["min_mcap_quantile"])) else 0.0,
             "csi1000_close": round(float(reg_row["csi1000_close"]), 2),
             "csi1000_ma20": round(float(reg_row["csi1000_ma20"]), 2) if pd.notna(reg_row["csi1000_ma20"]) else None,
             "csi1000_ma60": round(float(reg_row["csi1000_ma60"]), 2) if pd.notna(reg_row["csi1000_ma60"]) else None,
+            "csi300_close": round(float(reg_row["csi300_close"]), 2) if ("csi300_close" in reg_row.index and pd.notna(reg_row["csi300_close"])) else None,
             "breadth_above_ma20": round(float(reg_row["breadth_above_ma20"]), 4),
             "is_realtime": False,
         }
@@ -119,10 +122,14 @@ class RecommendationEngine:
                         "is_realtime": bool(rt_snap.get("is_realtime", True)),
                         "regime": str(rt_snap["regime"]),
                         "target_exposure": round(float(rt_snap["target_exposure"]), 4),
+                        "style_mode": str(rt_snap.get("style_mode", "ALL_CAP")),
+                        "min_mcap_quantile": float(rt_snap.get("min_mcap_quantile", 0.0)),
                         "csi1000_close": rt_snap["csi1000_close"],
                         "csi1000_pct_chg": rt_snap.get("csi1000_pct_chg"),
                         "csi1000_ma20": rt_snap["csi1000_ma20"],
                         "csi1000_ma60": rt_snap["csi1000_ma60"],
+                        "csi300_close": rt_snap.get("csi300_close"),
+                        "csi300_pct_chg": rt_snap.get("csi300_pct_chg"),
                         "breadth_above_ma20": rt_snap["breadth_above_ma20"],
                     }
             except Exception as exc:  # noqa: BLE001
@@ -202,6 +209,14 @@ class RecommendationEngine:
         regime_label = str(regime_info["regime"])
         eff_holdings = base_cfg.target_holdings
         eligible_for_sel = f_run.universe.eligible.loc[latest_dt].copy()
+        if DEFAULT_MIN_PRICE > 0.0:
+            raw_px_s = pd.Series({c: _ref_price(c) for c in eligible_for_sel.index})
+            is_held_s = pd.Series([c in held_set for c in eligible_for_sel.index], index=eligible_for_sel.index)
+            eligible_for_sel = eligible_for_sel & ((raw_px_s >= DEFAULT_MIN_PRICE) | is_held_s)
+        min_mcap_q = float(regime_info.get("min_mcap_quantile") or 0.0)
+        if min_mcap_q > 0.0 and latest_dt in f_run.universe.mcap_pct_rank.index:
+            mcap_ok = f_run.universe.mcap_pct_rank.loc[latest_dt].reindex(eligible_for_sel.index) >= min_mcap_q
+            eligible_for_sel = eligible_for_sel & mcap_ok.fillna(False)
         if acct_equity > 0 and target_exp > 1e-5:
             target_budget = acct_equity * target_exp
             min_slots_for_cap = max(1, int(np.ceil(target_exp / max(base_cfg.max_single_weight, 1e-6))))

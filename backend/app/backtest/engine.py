@@ -30,6 +30,7 @@ from app.broker.drawdown_fuse import DrawdownFuseConfig, DrawdownFuseState, step
 from app.core.constants import (
     BENCHMARK_CSI1000,
     BENCHMARK_CSI300,
+    DEFAULT_MIN_PRICE,
     DEFAULT_REBALANCE_DAYS,
     DEFAULT_SLIPPAGE_BPS,
     LOT_SIZE,
@@ -77,6 +78,8 @@ class BacktestConfig:
     halt_cooldown_days: int = 20
     enable_regime_timing: bool = True
     enable_technical_filter: bool = True
+    min_buy_price: float = DEFAULT_MIN_PRICE  # 选股执行层防面值退市硬底线（不扰动因子标准化与训练样本）
+    cash_yield_rate: float = 0.0         # 可选闲置现金货币ETF年化收益率（默认0%=纯股票Alpha，可设0.015/0.018）
     price_mode: Literal["open", "close"] = "open"
 
 
@@ -137,6 +140,7 @@ class AShareBacktestEngine:
         industries = panel.industry_of()
         names = panel.name_of()
         returns_panel = panel.returns
+        mcap_pct_rank = panel.total_mv.where(~panel.is_suspended).rank(axis=1, pct=True)
 
         cash = float(cfg.initial_cash)
         positions: dict[str, _Position] = {}
@@ -165,6 +169,7 @@ class AShareBacktestEngine:
         tot_stamp = 0.0
         tot_transfer = 0.0
         tot_slip = 0.0
+        total_cash_interest = 0.0
 
         port_cfg = PortfolioConfig(
             top_candidates=cfg.top_candidates,
@@ -210,7 +215,11 @@ class AShareBacktestEngine:
         for day_idx, dt in enumerate(sim_dates):
             dt_str = str(dt.date())
 
-            # 1) PRE-OPEN: T+1 unlock & corporate-action continuity via adj_factor ratio
+            # 1) PRE-OPEN: Optional risk-free money-market yield on overnight idle cash + T+1 unlock + ex-div
+            if day_idx > 0 and cfg.cash_yield_rate > 0.0 and cash > 0.0:
+                daily_interest = cash * (cfg.cash_yield_rate / 252.0)
+                cash += daily_interest
+                total_cash_interest += daily_interest
             for code, pos in list(positions.items()):
                 pos.sellable_shares = pos.total_shares
                 # Detect TRUE ex-dividend / ex-right dates via exchange pre_close vs prior day raw close
@@ -421,6 +430,16 @@ class AShareBacktestEngine:
 
             target_exposure = float(reg_row["target_exposure"]) if (reg_row is not None and cfg.enable_regime_timing) else 0.90
             target_exposure *= fuse_step.exposure_mult
+            style_mode = (
+                str(reg_row["style_mode"])
+                if (reg_row is not None and cfg.enable_regime_timing and "style_mode" in reg_row.index and pd.notna(reg_row["style_mode"]))
+                else "ALL_CAP"
+            )
+            min_mcap_q = (
+                float(reg_row["min_mcap_quantile"])
+                if (reg_row is not None and cfg.enable_regime_timing and "min_mcap_quantile" in reg_row.index and pd.notna(reg_row["min_mcap_quantile"]))
+                else 0.0
+            )
 
             nav_records.append({
                 "date": dt_str,
@@ -430,9 +449,16 @@ class AShareBacktestEngine:
                 "exposure": round(mv / equity, 4) if equity > 0 else 0.0,
                 "positions": len(positions),
                 "regime": regime_label,
+                "style_mode": style_mode,
                 "fuse": fuse_state,
             })
-            regime_hist.append({"date": dt_str, "regime": regime_label, "target_exposure": target_exposure})
+            regime_hist.append({
+                "date": dt_str,
+                "regime": regime_label,
+                "target_exposure": target_exposure,
+                "style_mode": style_mode,
+                "min_mcap_quantile": min_mcap_q,
+            })
 
             stopped_recently = stopped_today
             if stopped_today:
@@ -446,6 +472,10 @@ class AShareBacktestEngine:
             if should_eval:
                 day_scores = oos_scores.loc[dt]
                 day_elig = eligible.loc[dt]
+                if cfg.min_buy_price > 0.0:
+                    day_elig = day_elig & (panel.close.loc[dt] >= cfg.min_buy_price)
+                if min_mcap_q > 0.0 and dt in mcap_pct_rank.index:
+                    day_elig = day_elig & (mcap_pct_rank.loc[dt] >= min_mcap_q)
                 day_tech = technical.passed.loc[dt] if cfg.enable_technical_filter else pd.Series(True, index=panel.codes)
                 held_set = set(positions.keys()) - set(pending_sells.keys())
 
@@ -570,6 +600,8 @@ class AShareBacktestEngine:
         )
         metrics["avg_hold_days"] = round(float(np.mean(closed_hold_days)), 1) if closed_hold_days else None
         metrics["holding_mode"] = cfg.holding_mode
+        metrics["cash_yield_rate"] = float(cfg.cash_yield_rate)
+        metrics["total_cash_interest"] = round(float(total_cash_interest), 2)
 
         # Normalize curves to 1.0000 for charting
         norm_strat = nav_series / nav_series.iloc[0]

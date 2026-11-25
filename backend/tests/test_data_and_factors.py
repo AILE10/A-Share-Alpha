@@ -264,3 +264,17 @@ class TestAnalytics:
         assert corr.shape == (len(ALL_FACTOR_NAMES), len(ALL_FACTOR_NAMES)) == (20, 20)
         valid = [n for n in corr.index if corr.loc[n, n] != 0]
         assert np.allclose(np.diag(corr.loc[valid, valid]), 1.0)
+
+    def test_penny_stock_delisting_guard(self, real_panel):
+        import dataclasses
+        from app.factors.universe import UniverseConfig, apply_universe_filter
+
+        # Inject a single penny stock bar (< 2.5 CNY) on a copy of close -> must be excluded with PENNY_STOCK tag
+        close_copy = real_panel.close.copy()
+        target_code = real_panel.codes[0]
+        last_dt = real_panel.dates[-1]
+        close_copy.loc[last_dt, target_code] = 1.95
+        mod_panel = dataclasses.replace(real_panel, close=close_copy)
+        uni = apply_universe_filter(mod_panel, UniverseConfig(min_price=2.5))
+        assert not bool(uni.eligible.loc[last_dt, target_code])
+        assert "PENNY_STOCK_2.5" in str(uni.reason.loc[last_dt, target_code])

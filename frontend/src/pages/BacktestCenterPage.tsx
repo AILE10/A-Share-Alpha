@@ -541,6 +541,7 @@ export const BacktestCenterPage: React.FC = () => {
               hard_stop_pct: 0.08,
               atr_stop_mult: 2.5,
               slippage_bps: 10,
+              cash_yield_rate: 0,
               enable_regime_timing: true,
               enable_technical_filter: true,
               include_heatmap: true,
@@ -658,6 +659,18 @@ export const BacktestCenterPage: React.FC = () => {
                 <InputNumber min={1.0} max={5.0} step={0.5} className="w-full" />
               </Form.Item>
             </div>
+            <Form.Item
+              name="cash_yield_rate"
+              label={<Tooltip title="默认 0% 仅统计纯股票 Alpha；可切换 1.5%/1.8% 查看空仓期闲置现金配置货币ETF/国债逆回购的真实底薪视角">闲置现金货币底薪</Tooltip>}
+            >
+              <Select
+                options={[
+                  { value: 0, label: '0% · 纯股票 Alpha 口径 (默认)' },
+                  { value: 0.015, label: '1.5% · 货币 ETF 保守底薪' },
+                  { value: 0.018, label: '1.8% · 国债逆回购参考底薪' },
+                ]}
+              />
+            </Form.Item>
             <div className="grid grid-cols-3 gap-1 mb-3">
               <Form.Item name="enable_regime_timing" label="大盘择时" valuePropName="checked" className="mb-0">
                 <Switch size="small" />
@@ -719,6 +732,7 @@ export const BacktestCenterPage: React.FC = () => {
                   </span>
                   <span>
                     样本外 RankIC: <b className="num text-sky-400">{fmtNum(m.oos_rank_ic, 4)}</b> | 累计费+滑: <b className="num text-amber-400">¥{fmtNum(m.total_cost)}</b>
+                    {m.total_cash_interest > 0 ? <> | 货币底薪: <b className="num text-emerald-400">+¥{fmtNum(m.total_cash_interest)}</b></> : null}
                     {m.elapsed_sec ? <> | 耗时: <b className="num text-slate-300">{m.elapsed_sec}s</b></> : null}
                   </span>
                 </div>

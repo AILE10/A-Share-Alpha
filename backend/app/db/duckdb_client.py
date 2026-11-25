@@ -149,7 +149,12 @@ CREATE TABLE IF NOT EXISTS market_regime_daily (
     csi1000_ma60 DOUBLE,
     breadth_above_ma20 DOUBLE,
     regime VARCHAR NOT NULL,
-    target_exposure DOUBLE NOT NULL
+    target_exposure DOUBLE NOT NULL,
+    style_mode VARCHAR DEFAULT 'ALL_CAP',
+    min_mcap_quantile DOUBLE DEFAULT 0.0,
+    csi300_close DOUBLE,
+    csi300_ma20 DOUBLE,
+    csi300_ma60 DOUBLE
 );
 """
 
@@ -175,6 +180,11 @@ class DuckDBClient:
                 "ALTER TABLE financial_pit ADD COLUMN IF NOT EXISTS total_share DOUBLE",
                 "ALTER TABLE financial_pit ADD COLUMN IF NOT EXISTS bps DOUBLE",
                 "ALTER TABLE financial_pit ADD COLUMN IF NOT EXISTS eps_ttm DOUBLE",
+                "ALTER TABLE market_regime_daily ADD COLUMN IF NOT EXISTS style_mode VARCHAR DEFAULT 'ALL_CAP'",
+                "ALTER TABLE market_regime_daily ADD COLUMN IF NOT EXISTS min_mcap_quantile DOUBLE DEFAULT 0.0",
+                "ALTER TABLE market_regime_daily ADD COLUMN IF NOT EXISTS csi300_close DOUBLE",
+                "ALTER TABLE market_regime_daily ADD COLUMN IF NOT EXISTS csi300_ma20 DOUBLE",
+                "ALTER TABLE market_regime_daily ADD COLUMN IF NOT EXISTS csi300_ma60 DOUBLE",
             ):
                 self._conn.execute(col_sql)
 

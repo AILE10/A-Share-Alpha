@@ -403,24 +403,32 @@ class TestRealDataBacktestIntegration:
         from datetime import timedelta
 
         from app.strategy.realtime_regime import RealtimeRegimeService
-        from app.strategy.regime import RegimeConfig, classify_regime_point
+        from app.strategy.regime import RegimeConfig, classify_regime_detail, classify_regime_point
 
         cfg = RegimeConfig()
         reg_df = compute_market_regime(real_panel, cfg)
         last = reg_df.iloc[-1]
-        # Shared classifier must match compute_market_regime identically
+        # Shared classifier must match compute_market_regime identically (including dual-index CSI300 inputs)
         idx = real_panel.index_close["000852.SH"].reindex(real_panel.dates).ffill()
         r5 = float(idx.iloc[-1] / idx.iloc[-6] - 1.0)
-        cls_reg, cls_exp = classify_regime_point(
+        idx300 = real_panel.index_close.get("000300.SH")
+        r5_300 = float(idx300.reindex(real_panel.dates).ffill().iloc[-1] / idx300.reindex(real_panel.dates).ffill().iloc[-6] - 1.0) if idx300 is not None else 0.0
+        cls_reg, cls_exp, cls_style, cls_mcap_q = classify_regime_detail(
             float(last["csi1000_close"]),
             float(last["csi1000_ma20"]),
             float(last["csi1000_ma60"]),
             float(last["breadth_above_ma20"]),
             r5,
             cfg,
+            csi300_close=float(last["csi300_close"]) if pd.notna(last.get("csi300_close")) else None,
+            csi300_ma20=float(last["csi300_ma20"]) if pd.notna(last.get("csi300_ma20")) else None,
+            csi300_ma60=float(last["csi300_ma60"]) if pd.notna(last.get("csi300_ma60")) else None,
+            csi300_ret_5d=r5_300,
         )
         assert cls_reg == last["regime"]
         assert cls_exp == pytest.approx(float(last["target_exposure"]))
+        assert cls_style == last["style_mode"]
+        assert cls_mcap_q == pytest.approx(float(last["min_mcap_quantile"]))
 
         # Baseline strictly loads finalized EOD bars < live_quote_date (never double-counts today)
         svc = RealtimeRegimeService(cfg)
@@ -431,6 +439,7 @@ class TestRealDataBacktestIntegration:
         assert base.idx_cnt_19 == 19
         assert base.idx_cnt_59 == 59
         assert base.idx_close_5d_ago is not None and base.idx_close_5d_ago > 0
+        assert base.csi300_cnt_19 == 19 and base.csi300_cnt_59 == 59
 
         # Golden-Cross TopSafe asymmetric rules verification
         assert classify_regime_point(7200, 7000, 6800, 0.52, 0.02, cfg) == ("OFFENSIVE", 0.98)
@@ -439,3 +448,50 @@ class TestRealDataBacktestIntegration:
         assert classify_regime_point(6600, 6500, 6800, 0.45, 0.02, cfg) == ("NEUTRAL", 0.30)  # death-cross bounce
         assert classify_regime_point(6200, 6500, 6800, 0.22, -0.03, cfg) == ("DEFENSIVE", 0.0)  # deep bear 0% cash
         assert classify_regime_point(6200, 6500, 6800, 0.30, -0.02, cfg) == ("DEFENSIVE", 0.10)  # regular bear 10%
+
+        # Dual-Index "二八分化" Large-Cap Rescue (D2_Dual_Rescue60_Cap50) verification
+        # 1) CSI1000 weak (10% / 30%) & non-crash, while CSI300 bullish (>MA20 & >MA60) -> 60% LARGE_CAP_RESCUE (>=50% mcap)
+        assert classify_regime_detail(
+            6200, 6500, 6800, 0.30, -0.02, cfg,
+            csi300_close=4100, csi300_ma20=4000, csi300_ma60=3900, csi300_ret_5d=0.01,
+        ) == ("NEUTRAL", 0.60, "LARGE_CAP_RESCUE", 0.50)
+        # 2) Systemic crash veto: CSI300 5d drop <= -5% OR breadth < 18% -> rescue blocked, stays 0% ALL_CAP
+        assert classify_regime_detail(
+            6200, 6500, 6800, 0.30, -0.02, cfg,
+            csi300_close=4100, csi300_ma20=4000, csi300_ma60=3900, csi300_ret_5d=-0.06,
+        ) == ("DEFENSIVE", 0.10, "ALL_CAP", 0.0)
+        assert classify_regime_detail(
+            6200, 6500, 6800, 0.15, -0.02, cfg,
+            csi300_close=4100, csi300_ma20=4000, csi300_ma60=3900, csi300_ret_5d=0.01,
+        ) == ("DEFENSIVE", 0.0, "ALL_CAP", 0.0)
+        # 3) CSI1000 already strong bull -> never downgrades to rescue
+        assert classify_regime_detail(
+            7200, 7000, 6800, 0.52, 0.02, cfg,
+            csi300_close=4100, csi300_ma20=4000, csi300_ma60=3900, csi300_ret_5d=0.01,
+        ) == ("OFFENSIVE", 0.98, "ALL_CAP", 0.0)
+
+    def test_optional_idle_cash_yield_accrual(self, factor_run):
+        # Pure cash test (all scores NaN / zero exposure) verifies exact daily overnight money-market yield
+        panel = factor_run.panel
+        elig = factor_run.universe.eligible
+        tech = compute_technical_signals(panel)
+        reg = compute_market_regime(panel)
+        reg["regime"] = "DEFENSIVE"
+        reg["target_exposure"] = 0.0
+        reg["style_mode"] = "ALL_CAP"
+        reg["min_mcap_quantile"] = 0.0
+        scores = pd.DataFrame(0.0, index=panel.dates, columns=panel.codes)
+
+        res0 = AShareBacktestEngine(BacktestConfig(cash_yield_rate=0.0)).run(
+            panel, scores, elig, tech, reg, start_date=panel.dates[-60]
+        )
+        res15 = AShareBacktestEngine(BacktestConfig(cash_yield_rate=0.015)).run(
+            panel, scores, elig, tech, reg, start_date=panel.dates[-60]
+        )
+        assert res0.metrics["total_cash_interest"] == 0.0
+        assert res0.metrics["total_return"] == pytest.approx(0.0, abs=1e-6)
+        assert res15.metrics["total_cash_interest"] > 0.0
+        assert res15.metrics["total_return"] > res0.metrics["total_return"]
+        # 59 overnight accruals at 1.5%/252 on 1,000,000 CNY ~ 3,518 CNY
+        expected_mult = (1.0 + 0.015 / 252.0) ** (len(res15.daily_nav) - 1) - 1.0
+        assert res15.metrics["total_return"] == pytest.approx(expected_mult, rel=1e-3)

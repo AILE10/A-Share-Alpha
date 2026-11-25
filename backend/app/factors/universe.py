@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from app.core.constants import DEFAULT_MICRO_CAP_QUANTILE, DEFAULT_MIN_AVG_AMOUNT_20D, DEFAULT_MIN_LIST_DAYS
+from app.core.constants import (
+    DEFAULT_MICRO_CAP_QUANTILE,
+    DEFAULT_MIN_AVG_AMOUNT_20D,
+    DEFAULT_MIN_LIST_DAYS,
+    DEFAULT_MIN_PRICE,
+)
 from app.factors.panel import MarketPanel, trading_days_since_listing
 
 
@@ -16,6 +21,9 @@ class UniverseConfig:
     min_list_days: int = DEFAULT_MIN_LIST_DAYS
     min_avg_amount_20d: float = DEFAULT_MIN_AVG_AMOUNT_20D
     micro_cap_quantile: float = DEFAULT_MICRO_CAP_QUANTILE
+    # Keep 0.0 during factor standardization & ML training (preserving distressed negative examples);
+    # the >= 2.5 CNY delisting guard is enforced strictly at execution/selection time in engine & recommender.
+    min_price: float = 0.0
 
 
 @dataclass
@@ -89,6 +97,8 @@ def apply_universe_filter(
     tag(list_days < cfg.min_list_days, f"SUB_NEW_{cfg.min_list_days}D")
     tag(avg_amt.isna() | (avg_amt < cfg.min_avg_amount_20d), "LOW_LIQ_50M")
     tag(mcap_rank.isna() | (mcap_rank < cfg.micro_cap_quantile), "MICRO_CAP_10P")
+    if cfg.min_price > 0:
+        tag(panel.close.isna() | (panel.close < cfg.min_price), f"PENNY_STOCK_{cfg.min_price:g}")
 
     eligible = reason == ""
     return UniverseResult(

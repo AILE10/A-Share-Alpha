@@ -184,6 +184,16 @@ export const AppShell: React.FC<Props> = ({ children }) => {
                           : ''}
                         {' · '}MA20 {regimeDetail.csi1000_ma20 ?? '-'} / MA60 {regimeDetail.csi1000_ma60 ?? '-'}
                       </div>
+                      {regimeDetail.csi300_close !== undefined && regimeDetail.csi300_close !== null && (
+                        <div>
+                          沪深300: {regimeDetail.csi300_close}
+                          {regimeDetail.csi300_pct_chg !== undefined && regimeDetail.csi300_pct_chg !== null
+                            ? ` (${regimeDetail.csi300_pct_chg >= 0 ? '+' : ''}${Number(regimeDetail.csi300_pct_chg).toFixed(2)}%)`
+                            : ''}
+                          {' · '}
+                          {regimeDetail.style_mode === 'LARGE_CAP_RESCUE' ? '二八分化 → 切前50%大中盘' : '全市场选股'}
+                        </div>
+                      )}
                       <div>
                         全市场站上MA20宽度:{' '}
                         {regimeDetail.breadth_above_ma20 !== undefined && regimeDetail.breadth_above_ma20 !== null

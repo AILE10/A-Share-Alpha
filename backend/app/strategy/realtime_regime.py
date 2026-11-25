@@ -33,7 +33,7 @@ from app.core.constants import (
 from app.core.logging import get_logger
 from app.data.akshare_provider import AKShareProvider
 from app.db.duckdb_client import DuckDBClient, get_duckdb
-from app.strategy.regime import RegimeConfig, classify_regime_point
+from app.strategy.regime import RegimeConfig, classify_regime_detail
 
 logger = get_logger(__name__)
 
@@ -51,6 +51,11 @@ class _BaselineCache:
     idx_sum_59: float
     idx_cnt_59: int
     idx_close_5d_ago: float | None
+    csi300_sum_19: float = 0.0
+    csi300_cnt_19: int = 0
+    csi300_sum_59: float = 0.0
+    csi300_cnt_59: int = 0
+    csi300_close_5d_ago: float | None = None
 
 
 def fetch_realtime_index_quotes() -> dict[str, dict]:
@@ -174,6 +179,30 @@ class RealtimeRegimeService:
         tail59 = idx_closes[-59:]
         close_5d_ago = float(idx_closes[-5]) if len(idx_closes) >= 5 else None
 
+        # 1b) Finalized CSI 300 index closes strictly before live_quote_date (for dual-index style rescue)
+        idx300_df = db.query_df(
+            """
+            SELECT trade_date, close
+            FROM index_daily
+            WHERE index_code = ? AND trade_date < ?
+            ORDER BY trade_date DESC
+            LIMIT 59
+            """,
+            [BENCHMARK_CSI300, live_quote_date],
+        )
+        if not idx300_df.empty:
+            idx300_df = idx300_df.sort_values("trade_date")
+            c300_arr = idx300_df["close"].astype(float).to_numpy()
+            c300_t19 = c300_arr[-19:]
+            c300_t59 = c300_arr[-59:]
+            c300_sum_19, c300_cnt_19 = float(np.sum(c300_t19)), int(len(c300_t19))
+            c300_sum_59, c300_cnt_59 = float(np.sum(c300_t59)), int(len(c300_t59))
+            c300_5d_ago = float(c300_arr[-5]) if len(c300_arr) >= 5 else None
+        else:
+            c300_sum_19, c300_cnt_19 = 0.0, 0
+            c300_sum_59, c300_cnt_59 = 0.0, 0
+            c300_5d_ago = None
+
         # 2) Finalized last 19 trading days per stock strictly before live_quote_date
         dates_df = db.query_df(
             """
@@ -230,6 +259,11 @@ class RealtimeRegimeService:
             idx_sum_59=float(np.sum(tail59)),
             idx_cnt_59=int(len(tail59)),
             idx_close_5d_ago=close_5d_ago,
+            csi300_sum_19=c300_sum_19,
+            csi300_cnt_19=c300_cnt_19,
+            csi300_sum_59=c300_sum_59,
+            csi300_cnt_59=c300_cnt_59,
+            csi300_close_5d_ago=c300_5d_ago,
         )
         with self._lock:
             self._baseline = cache
@@ -312,13 +346,36 @@ class RealtimeRegimeService:
                 raise RuntimeError(f"Too few active realtime stock quotes ({valid_cnt}/{len(base.codes)})")
 
             breadth_now = above_cnt / valid_cnt
-            regime_str, target_exp = classify_regime_point(
+
+            csi300_q = idx_quotes.get(BENCHMARK_CSI300)
+            csi300_now = float(csi300_q["close"]) if csi300_q and csi300_q.get("close") else None
+            csi300_ma20_now = (
+                (base.csi300_sum_19 + csi300_now) / (base.csi300_cnt_19 + 1)
+                if (csi300_now is not None and (base.csi300_cnt_19 + 1) >= 15)
+                else None
+            )
+            csi300_ma60_now = (
+                (base.csi300_sum_59 + csi300_now) / (base.csi300_cnt_59 + 1)
+                if (csi300_now is not None and (base.csi300_cnt_59 + 1) >= 30)
+                else None
+            )
+            csi300_ret_5d_now = (
+                (csi300_now / base.csi300_close_5d_ago - 1.0)
+                if (csi300_now is not None and base.csi300_close_5d_ago is not None and base.csi300_close_5d_ago > 0)
+                else 0.0
+            )
+
+            regime_str, target_exp, style_mode, min_mcap_q = classify_regime_detail(
                 close=csi_now,
                 ma20=float(ma20_now) if pd.notna(ma20_now) else np.nan,
                 ma60=float(ma60_now) if pd.notna(ma60_now) else np.nan,
                 breadth=breadth_now,
                 ret_5d=ret_5d_now,
                 config=self.cfg,
+                csi300_close=csi300_now,
+                csi300_ma20=csi300_ma20_now,
+                csi300_ma60=csi300_ma60_now,
+                csi300_ret_5d=csi300_ret_5d_now,
             )
 
             elapsed = round(time.monotonic() - t0, 2)
@@ -329,10 +386,16 @@ class RealtimeRegimeService:
                 "is_realtime": bool(is_new_day or (now_cn().date() == live_date and now_cn().hour < 15)),
                 "regime": regime_str,
                 "target_exposure": float(target_exp),
+                "style_mode": style_mode,
+                "min_mcap_quantile": float(min_mcap_q),
                 "csi1000_close": round(csi_now, 2),
                 "csi1000_pct_chg": round(float(csi_q.get("pct_chg") or 0.0), 2),
                 "csi1000_ma20": round(float(ma20_now), 2) if pd.notna(ma20_now) else None,
                 "csi1000_ma60": round(float(ma60_now), 2) if pd.notna(ma60_now) else None,
+                "csi300_close": round(csi300_now, 2) if csi300_now is not None else None,
+                "csi300_pct_chg": round(float(csi300_q.get("pct_chg") or 0.0), 2) if csi300_q else None,
+                "csi300_ma20": round(float(csi300_ma20_now), 2) if csi300_ma20_now is not None else None,
+                "csi300_ma60": round(float(csi300_ma60_now), 2) if csi300_ma60_now is not None else None,
                 "ret_5d": round(float(ret_5d_now), 4),
                 "breadth_above_ma20": round(float(breadth_now), 4),
                 "quoted_count": int(valid_cnt),
