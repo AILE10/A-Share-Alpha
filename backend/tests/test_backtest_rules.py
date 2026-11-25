@@ -358,31 +358,31 @@ class TestRealDataBacktestIntegration:
         assert not (tech_ac.passed & tech_ac.macd_top_div).any().any()
         assert tech_ac.passed.sum().sum() >= tech_tr.passed.sum().sum()
 
-        # 2) Default Huber 10d + 3-Seed Bagging + strict embargo >= 10 zero look-ahead
+        # 2) Default Huber 10d + 6-Seed Bagging + strict embargo >= 10 zero look-ahead
         fwd_ex10 = forward_excess_returns(factor_run.panel, horizon=10)
         cfg = LGBMConfig(n_estimators=30)
         assert cfg.mode == "regression"
         assert cfg.label_horizon == 10
         assert cfg.embargo_days >= 10
-        assert len(cfg.effective_seeds()) == 3
+        assert len(cfg.effective_seeds()) == 6
 
         scorer = LGBMScorer(cfg)
         ml = scorer.run_walk_forward(factor_run.std, fwd_ex10, factor_run.universe.eligible, adaptive=True)
         assert isinstance(ml.latest_booster, EnsembleBooster)
-        assert len(ml.latest_booster.boosters) == 3
+        assert len(ml.latest_booster.boosters) == 6
         assert all(f["embargo_days"] >= 10 for f in ml.folds)
         first_oos = pd.Timestamp(ml.folds[0]["test_start"])
         assert ml.oos_scores.loc[ml.oos_scores.index < first_oos].isna().all().all()
 
-        # 3) ModelRegistry save & reload preserves full 3-seed EnsembleBooster & identical predictions/SHAP
+        # 3) ModelRegistry save & reload preserves full 6-seed EnsembleBooster & identical predictions/SHAP
         sqlite = SQLiteDatabase(tmp_path / "reg_test.db")
         sqlite.init_schema()
         reg = ModelRegistry(sqlite_db=sqlite, models_dir=tmp_path / "models")
-        saved = reg.save_version(ml, model_type="regression", embargo_days=10, activate=True, notes="bag3 test")
+        saved = reg.save_version(ml, model_type="regression", embargo_days=10, activate=True, notes="bag6 test")
         loaded_booster, meta = reg.load_active_booster()
         assert meta["version_id"] == saved["version_id"]
         assert isinstance(loaded_booster, EnsembleBooster)
-        assert len(loaded_booster.boosters) == 3
+        assert len(loaded_booster.boosters) == 6
 
         from app.ml.lgbm_scorer import build_ml_dataset
 
@@ -495,3 +495,41 @@ class TestRealDataBacktestIntegration:
         # 59 overnight accruals at 1.5%/252 on 1,000,000 CNY ~ 3,518 CNY
         expected_mult = (1.0 + 0.015 / 252.0) ** (len(res15.daily_nav) - 1) - 1.0
         assert res15.metrics["total_return"] == pytest.approx(expected_mult, rel=1e-3)
+
+    def test_bull_momentum_overlay_zero_lookahead_and_regime_gating(self, factor_run):
+        from app.strategy.regime import apply_bull_momentum_overlay, compute_bull_momentum_zscores
+
+        panel = factor_run.panel
+        elig = factor_run.universe.eligible
+        cut = panel.dates[-20]
+
+        # 1) Strictly causal zero look-ahead check on truncated panel
+        zh_full, zr_full = compute_bull_momentum_zscores(panel, elig)
+        trunc_panel = panel.slice_until(cut)
+        zh_trunc, zr_trunc = compute_bull_momentum_zscores(trunc_panel, elig.loc[:cut])
+        pd.testing.assert_series_equal(zh_full.loc[cut], zh_trunc.loc[cut], check_names=False)
+        pd.testing.assert_series_equal(zr_full.loc[cut], zr_trunc.loc[cut], check_names=False)
+
+        # 2) Regime gating: ZERO modification in NEUTRAL or DEFENSIVE; monotonic tilt in OFFENSIVE
+        base_scores = pd.Series(np.linspace(1.0, -1.0, len(panel.codes)), index=panel.codes)
+        for non_bull in ("NEUTRAL", "DEFENSIVE"):
+            unchanged = apply_bull_momentum_overlay(
+                base_scores, non_bull, zh_full.loc[cut], zr_full.loc[cut], w_h120=0.10, w_r20=0.08
+            )
+            pd.testing.assert_series_equal(unchanged, base_scores)
+
+        tilted = apply_bull_momentum_overlay(
+            base_scores, "OFFENSIVE", zh_full.loc[cut], zr_full.loc[cut], w_h120=0.10, w_r20=0.08
+        )
+        assert not np.allclose(tilted.to_numpy(), base_scores.to_numpy(), equal_nan=True)
+        # Stocks with high momentum z-scores must gain relative rank/score vs low momentum stocks
+        zh_row = zh_full.loc[cut].fillna(0.0)
+        zr_row = zr_full.loc[cut].fillna(0.0)
+        mom_comb = 0.10 * zh_row + 0.08 * zr_row
+        base_z = (base_scores - base_scores.mean()) / base_scores.std()
+        assert np.corrcoef((tilted - base_z).to_numpy(), mom_comb.to_numpy())[0, 1] > 0.99
+
+        # 3) BacktestConfig defaults expose verified 0.10 / 0.08 weights in metrics
+        cfg = BacktestConfig()
+        assert cfg.bull_mom_h120_weight == pytest.approx(0.10)
+        assert cfg.bull_mom_ret20_weight == pytest.approx(0.08)

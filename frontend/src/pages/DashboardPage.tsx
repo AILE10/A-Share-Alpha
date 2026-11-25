@@ -265,7 +265,7 @@ export const DashboardPage: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-slate-100 m-0">策略总览与大盘状态仪表盘</h1>
           <div className="text-xs text-slate-400 mt-0.5">
-            默认策略：20 因子增强 + Huber 10日 3-Seed Bagging + 双指数二八分化大中盘择时 + 2.5元面值退市防线 · DuckDB 实盘库 {dataStatus?.stocks_synced ?? 0} 只真股 ({dataStatus?.date_range?.[0]} ~ {dataStatus?.date_range?.[1]})
+            默认策略：20 因子增强 + Huber 10日 6-Seed Bagging + 强牛动量叠加 + 双指数二八分化择时 + 2.5元面值退市防线 · DuckDB 实盘库 {dataStatus?.stocks_synced ?? 0} 只真股 ({dataStatus?.date_range?.[0]} ~ {dataStatus?.date_range?.[1]})
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">

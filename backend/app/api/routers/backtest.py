@@ -41,7 +41,7 @@ class BacktestRunRequest(BaseModel):
     end_date: date | None = None
     model_mode: str = Field(default="regression", pattern="^(lambdarank|regression)$")
     label_horizon: int = Field(default=10, ge=5, le=20)
-    ensemble_seeds_count: int = Field(default=3, ge=1, le=7)
+    ensemble_seeds_count: int = Field(default=6, ge=1, le=12)
     weight_method: str = Field(default="risk_parity", pattern="^(risk_parity|equal_weight)$")
     holding_mode: str = Field(default="dynamic", pattern="^(dynamic|fixed)$")
     rebalance_days: int = Field(default=10, ge=1, le=20)
@@ -61,6 +61,8 @@ class BacktestRunRequest(BaseModel):
     slippage_bps: float = Field(default=10.0, ge=0.0, le=50.0)
     enable_regime_timing: bool = True
     enable_technical_filter: bool = True
+    bull_mom_h120_weight: float = Field(default=0.10, ge=0.0, le=0.50)
+    bull_mom_ret20_weight: float = Field(default=0.08, ge=0.0, le=0.50)
     cash_yield_rate: float = Field(default=0.0, ge=0.0, le=0.05)
     include_heatmap: bool = True
     use_cache: bool = True
@@ -84,7 +86,7 @@ def _sample_codes() -> list[str] | None:
 
 
 def _build_configs(req: BacktestRunRequest) -> tuple[LGBMConfig, BacktestConfig]:
-    seed_pool = (42, 1024, 2026, 7, 99, 777, 2025)
+    seed_pool = (42, 1024, 2026, 7, 99, 777, 11, 22, 33, 44, 55, 66)
     seeds = seed_pool[: max(1, int(req.ensemble_seeds_count))]
     embargo = max(5, int(req.label_horizon))
     lgbm_cfg = LGBMConfig(
@@ -113,6 +115,8 @@ def _build_configs(req: BacktestRunRequest) -> tuple[LGBMConfig, BacktestConfig]
         atr_stop_mult=req.atr_stop_mult,
         enable_regime_timing=req.enable_regime_timing,
         enable_technical_filter=req.enable_technical_filter,
+        bull_mom_h120_weight=req.bull_mom_h120_weight,
+        bull_mom_ret20_weight=req.bull_mom_ret20_weight,
         cash_yield_rate=req.cash_yield_rate,
     )
     return lgbm_cfg, bt_cfg

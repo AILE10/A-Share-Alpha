@@ -1,5 +1,5 @@
 """LightGBM cross-sectional regression/rank scorer with Purged Walk-Forward,
-3-Seed Bagging Ensemble variance reduction & exact additive TreeSHAP attribution."""
+6-Seed Bagging Ensemble variance reduction & exact additive TreeSHAP attribution."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from app.ml.splitter import PurgedWalkForwardSplitter, WalkForwardFold
 logger = get_logger(__name__)
 
 ModelMode = Literal["regression", "lambdarank"]
-DEFAULT_ENSEMBLE_SEEDS: tuple[int, ...] = (42, 1024, 2026)
+DEFAULT_ENSEMBLE_SEEDS: tuple[int, ...] = (42, 1024, 2026, 7, 99, 777)
 
 
 class EnsembleBooster:

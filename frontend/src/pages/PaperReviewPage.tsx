@@ -300,7 +300,7 @@ export const PaperReviewPage: React.FC = () => {
                 <div className="space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded bg-[#0F1624] border border-slate-800">
                     <div className="text-xs text-slate-300">
-                      一键滚动重训将严格执行 <b>Purged Walk-Forward (10日标签 · Embargo ≥ 10日 · 3-Seed Bagging)</b> 并落盘新版本快照，支持随时无损回滚至任意历史版本。
+                      一键滚动重训将严格执行 <b>Purged Walk-Forward (10日标签 · Embargo ≥ 10日 · 6-Seed Bagging)</b> 并落盘新版本快照，支持随时无损回滚至任意历史版本。
                     </div>
                     <div className="flex items-center gap-2">
                       <Select

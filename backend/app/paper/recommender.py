@@ -12,7 +12,13 @@ import pandas as pd
 
 from app.api.ws_manager import ws_manager
 from app.core.calendar import today_cn
-from app.core.constants import ALL_FACTOR_NAMES, DEFAULT_MIN_PRICE, FACTOR_META_MAP
+from app.core.constants import (
+    ALL_FACTOR_NAMES,
+    DEFAULT_BULL_MOM_H120_WEIGHT,
+    DEFAULT_BULL_MOM_RET20_WEIGHT,
+    DEFAULT_MIN_PRICE,
+    FACTOR_META_MAP,
+)
 from app.core.logging import get_logger
 from app.db.duckdb_client import DuckDBClient, get_duckdb
 from app.db.models import PaperAccount, PaperOrder, PaperPosition, SignalRecommendation
@@ -27,7 +33,12 @@ from app.strategy.dynamic_holding import (
     select_dynamic_portfolio,
 )
 from app.strategy.optimizer import PortfolioConfig, select_portfolio_names, solve_portfolio_weights
-from app.strategy.regime import compute_market_regime, persist_market_regime
+from app.strategy.regime import (
+    apply_bull_momentum_overlay,
+    compute_bull_momentum_zscores,
+    compute_market_regime,
+    persist_market_regime,
+)
 from app.strategy.technical import compute_technical_signals
 
 logger = get_logger(__name__)
@@ -63,7 +74,7 @@ class RecommendationEngine:
             meta, _ = self.registry.retrain_and_register(
                 codes=codes,
                 model_type="regression",
-                notes="首次初始化训练快照 (Huber 10d · 3-Seed Bagging)",
+                notes="首次初始化训练快照 (Huber 10d · 6-Seed Bagging)",
                 duckdb_client=self.db,
             )
             return self.registry.load_active_booster()
@@ -152,6 +163,18 @@ class RecommendationEngine:
         latest_df["score"] = scores_arr
 
         score_series = pd.Series(scores_arr, index=latest_df["ts_code"].to_numpy())
+        z_h120_df, z_r20_df = compute_bull_momentum_zscores(panel, f_run.universe.eligible)
+        live_regime_label = str(regime_info["regime"])
+        if live_regime_label == "OFFENSIVE":
+            score_series = apply_bull_momentum_overlay(
+                scores=score_series,
+                regime=live_regime_label,
+                z_h120_row=z_h120_df.loc[latest_dt],
+                z_r20_row=z_r20_df.loc[latest_dt],
+                w_h120=DEFAULT_BULL_MOM_H120_WEIGHT,
+                w_r20=DEFAULT_BULL_MOM_RET20_WEIGHT,
+            )
+            latest_df["score"] = score_series.to_numpy()
         shap_by_code = shap_df.copy()
         shap_by_code.index = latest_df["ts_code"].to_numpy()
 
@@ -270,8 +293,20 @@ class RecommendationEngine:
                 if not trail_df.empty:
                     trail_df = trail_df.copy()
                     trail_df["score"] = scorer.predict(trail_df, booster)
-                    for _, grp in trail_df.groupby("trade_date", sort=True):
-                        ordered_codes = grp.sort_values("score", ascending=False)["ts_code"].tolist()
+                    for td, grp in trail_df.groupby("trade_date", sort=True):
+                        ts_td = pd.Timestamp(td)
+                        td_scores = pd.Series(grp["score"].to_numpy(dtype=float), index=grp["ts_code"].to_numpy())
+                        td_reg = str(regime_df.loc[ts_td, "regime"]) if ts_td in regime_df.index else "NEUTRAL"
+                        if td_reg == "OFFENSIVE" and ts_td in z_h120_df.index:
+                            td_scores = apply_bull_momentum_overlay(
+                                scores=td_scores,
+                                regime=td_reg,
+                                z_h120_row=z_h120_df.loc[ts_td],
+                                z_r20_row=z_r20_df.loc[ts_td],
+                                w_h120=DEFAULT_BULL_MOM_H120_WEIGHT,
+                                w_r20=DEFAULT_BULL_MOM_RET20_WEIGHT,
+                            )
+                        ordered_codes = td_scores.sort_values(ascending=False).index.tolist()
                         rm = {c: i + 1 for i, c in enumerate(ordered_codes)}
                         for c in held_map:
                             if rm.get(c, 9999) > dyn_cfg.buffer_rank:

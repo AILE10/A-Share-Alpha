@@ -33,6 +33,8 @@ DEFAULT_MIN_LIST_DAYS = 120
 DEFAULT_MIN_AVG_AMOUNT_20D = 50_000_000.0  # 5000 万元
 DEFAULT_MICRO_CAP_QUANTILE = 0.10          # 剔除总市值后 10%
 DEFAULT_MIN_PRICE = 2.5                    # 防 1 元面值退市硬底线（剔除 < 2.5 元低价仙股）
+DEFAULT_BULL_MOM_H120_WEIGHT = 0.10        # OFFENSIVE 强牛期温和动量倾斜：距120日新高权重（非强牛=0）
+DEFAULT_BULL_MOM_RET20_WEIGHT = 0.08       # OFFENSIVE 强牛期温和动量倾斜：20日动量权重（非强牛=0）
 
 # 4-Dimension 20 Core Factors Metadata
 FACTOR_DEFINITIONS: list[dict[str, str | int]] = [

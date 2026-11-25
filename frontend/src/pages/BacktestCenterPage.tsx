@@ -35,10 +35,11 @@ interface RunningJobState {
 
 const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
   {
-    label: '最优动态+Huber10日(推荐)',
+    label: '最优动态+Huber10日Bag6+强牛动量(推荐)',
     values: {
-      name: '最优动态持有-Huber10日Bag3+防追高',
+      name: '最优动态持有-Huber10日Bag6+强牛动量倾斜',
       model_mode: 'regression',
+      ensemble_seeds_count: 6,
       weight_method: 'risk_parity',
       holding_mode: 'dynamic',
       min_hold_days: 10,
@@ -53,16 +54,19 @@ const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
       hard_stop_pct: 0.08,
       atr_stop_mult: 2.5,
       slippage_bps: 10,
+      bull_mom_h120_weight: 0.1,
+      bull_mom_ret20_weight: 0.08,
       enable_regime_timing: true,
       enable_technical_filter: true,
       include_heatmap: true,
     },
   },
   {
-    label: '对照:LambdaRank排序',
+    label: '对照:纯模型(关闭强牛动量)',
     values: {
-      name: '对照实验-LambdaRank10日Bag3+风险平价',
-      model_mode: 'lambdarank',
+      name: '对照实验-Huber10日Bag6纯模型(关强牛动量)',
+      model_mode: 'regression',
+      ensemble_seeds_count: 6,
       weight_method: 'risk_parity',
       holding_mode: 'dynamic',
       min_hold_days: 10,
@@ -77,9 +81,11 @@ const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
       hard_stop_pct: 0.08,
       atr_stop_mult: 2.5,
       slippage_bps: 10,
+      bull_mom_h120_weight: 0,
+      bull_mom_ret20_weight: 0,
       enable_regime_timing: true,
       enable_technical_filter: true,
-      include_heatmap: true,
+      include_heatmap: false,
     },
   },
   {
@@ -522,10 +528,11 @@ export const BacktestCenterPage: React.FC = () => {
             layout="vertical"
             size="small"
             initialValues={{
-              name: '最优动态持有-Huber10日Bag3(25年1月至今)',
+              name: '最优动态持有-Huber10日Bag6+强牛动量(25年1月至今)',
               start_date: '2025-01-01',
               end_date: '',
               model_mode: 'regression',
+              ensemble_seeds_count: 6,
               weight_method: 'risk_parity',
               holding_mode: 'dynamic',
               rebalance_days: 10,
@@ -541,6 +548,8 @@ export const BacktestCenterPage: React.FC = () => {
               hard_stop_pct: 0.08,
               atr_stop_mult: 2.5,
               slippage_bps: 10,
+              bull_mom_h120_weight: 0.1,
+              bull_mom_ret20_weight: 0.08,
               cash_yield_rate: 0,
               enable_regime_timing: true,
               enable_technical_filter: true,
@@ -586,9 +595,21 @@ export const BacktestCenterPage: React.FC = () => {
                 ]}
               />
             </Form.Item>
-            <Form.Item name="model_mode" label="LightGBM 模式 (10日预测 · 3-Seed Bagging)">
-              <Select options={[{ value: 'regression', label: 'Huber 回归打分 (推荐 · 消除尾部过拟合)' }, { value: 'lambdarank', label: 'LambdaRank 截面排序 (对照)' }]} />
-            </Form.Item>
+            <div className="grid grid-cols-3 gap-2">
+              <Form.Item name="model_mode" label="LightGBM 模式 (10日)" className="col-span-2">
+                <Select options={[{ value: 'regression', label: 'Huber 回归 (推荐)' }, { value: 'lambdarank', label: 'LambdaRank (对照)' }]} />
+              </Form.Item>
+              <Form.Item name="ensemble_seeds_count" label="集成种子">
+                <Select
+                  options={[
+                    { value: 6, label: '6-Seed(推荐)' },
+                    { value: 3, label: '3-Seed(快)' },
+                    { value: 12, label: '12-Seed(极稳)' },
+                    { value: 1, label: '1-Seed' },
+                  ]}
+                />
+              </Form.Item>
+            </div>
             <Form.Item name="weight_method" label="组合优化权重">
               <Select options={[{ value: 'risk_parity', label: '风险平价 (Risk Parity)' }, { value: 'equal_weight', label: '等权组合 (Equal Weight)' }]} />
             </Form.Item>
@@ -657,6 +678,20 @@ export const BacktestCenterPage: React.FC = () => {
               </Form.Item>
               <Form.Item name="atr_stop_mult" label="ATR止损倍数">
                 <InputNumber min={1.0} max={5.0} step={0.5} className="w-full" />
+              </Form.Item>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Form.Item
+                name="bull_mom_h120_weight"
+                label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：给模型打分温和叠加距120日新高 Z-Score（震荡/熊市=0）">强牛新高倾斜</Tooltip>}
+              >
+                <InputNumber min={0} max={0.5} step={0.02} className="w-full" />
+              </Form.Item>
+              <Form.Item
+                name="bull_mom_ret20_weight"
+                label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：给模型打分温和叠加20日动量 Z-Score（震荡/熊市=0）">强牛动量倾斜</Tooltip>}
+              >
+                <InputNumber min={0} max={0.5} step={0.02} className="w-full" />
               </Form.Item>
             </div>
             <Form.Item

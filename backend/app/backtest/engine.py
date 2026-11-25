@@ -30,6 +30,8 @@ from app.broker.drawdown_fuse import DrawdownFuseConfig, DrawdownFuseState, step
 from app.core.constants import (
     BENCHMARK_CSI1000,
     BENCHMARK_CSI300,
+    DEFAULT_BULL_MOM_H120_WEIGHT,
+    DEFAULT_BULL_MOM_RET20_WEIGHT,
     DEFAULT_MIN_PRICE,
     DEFAULT_REBALANCE_DAYS,
     DEFAULT_SLIPPAGE_BPS,
@@ -43,6 +45,7 @@ from app.strategy.dynamic_holding import (
     select_dynamic_portfolio,
 )
 from app.strategy.optimizer import PortfolioConfig, WeightMethod, select_portfolio_names, solve_portfolio_weights
+from app.strategy.regime import apply_bull_momentum_overlay, compute_bull_momentum_zscores
 from app.strategy.technical import TechnicalResult
 
 HoldingMode = Literal["fixed", "dynamic"]
@@ -78,6 +81,8 @@ class BacktestConfig:
     halt_cooldown_days: int = 20
     enable_regime_timing: bool = True
     enable_technical_filter: bool = True
+    bull_mom_h120_weight: float = DEFAULT_BULL_MOM_H120_WEIGHT  # OFFENSIVE 强牛期温和动量倾斜(距120日新高)
+    bull_mom_ret20_weight: float = DEFAULT_BULL_MOM_RET20_WEIGHT  # OFFENSIVE 强牛期温和动量倾斜(20日动量)
     min_buy_price: float = DEFAULT_MIN_PRICE  # 选股执行层防面值退市硬底线（不扰动因子标准化与训练样本）
     cash_yield_rate: float = 0.0         # 可选闲置现金货币ETF年化收益率（默认0%=纯股票Alpha，可设0.015/0.018）
     price_mode: Literal["open", "close"] = "open"
@@ -141,6 +146,11 @@ class AShareBacktestEngine:
         names = panel.name_of()
         returns_panel = panel.returns
         mcap_pct_rank = panel.total_mv.where(~panel.is_suspended).rank(axis=1, pct=True)
+        use_bull_mom = (
+            cfg.enable_regime_timing
+            and (cfg.bull_mom_h120_weight > 0.0 or cfg.bull_mom_ret20_weight > 0.0)
+        )
+        z_h120_df, z_r20_df = compute_bull_momentum_zscores(panel, eligible) if use_bull_mom else (None, None)
 
         cash = float(cfg.initial_cash)
         positions: dict[str, _Position] = {}
@@ -471,6 +481,15 @@ class AShareBacktestEngine:
             )
             if should_eval:
                 day_scores = oos_scores.loc[dt]
+                if use_bull_mom and regime_label == "OFFENSIVE" and z_h120_df is not None and z_r20_df is not None:
+                    day_scores = apply_bull_momentum_overlay(
+                        scores=day_scores,
+                        regime=regime_label,
+                        z_h120_row=z_h120_df.loc[dt],
+                        z_r20_row=z_r20_df.loc[dt],
+                        w_h120=cfg.bull_mom_h120_weight,
+                        w_r20=cfg.bull_mom_ret20_weight,
+                    )
                 day_elig = eligible.loc[dt]
                 if cfg.min_buy_price > 0.0:
                     day_elig = day_elig & (panel.close.loc[dt] >= cfg.min_buy_price)
@@ -602,6 +621,8 @@ class AShareBacktestEngine:
         metrics["holding_mode"] = cfg.holding_mode
         metrics["cash_yield_rate"] = float(cfg.cash_yield_rate)
         metrics["total_cash_interest"] = round(float(total_cash_interest), 2)
+        metrics["bull_mom_h120_weight"] = float(cfg.bull_mom_h120_weight)
+        metrics["bull_mom_ret20_weight"] = float(cfg.bull_mom_ret20_weight)
 
         # Normalize curves to 1.0000 for charting
         norm_strat = nav_series / nav_series.iloc[0]

@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from app.core.constants import BENCHMARK_CSI1000, BENCHMARK_CSI300
+from app.core.constants import (
+    BENCHMARK_CSI1000,
+    BENCHMARK_CSI300,
+    DEFAULT_BULL_MOM_H120_WEIGHT,
+    DEFAULT_BULL_MOM_RET20_WEIGHT,
+)
 from app.db.duckdb_client import DuckDBClient
 from app.factors.panel import MarketPanel
 
@@ -214,3 +219,59 @@ def compute_market_regime(panel: MarketPanel, config: RegimeConfig | None = None
 
 def persist_market_regime(regime_df: pd.DataFrame, db: DuckDBClient) -> int:
     return db.upsert_df("market_regime_daily", regime_df.reset_index(drop=True))
+
+
+def _row_zscore_frame(df: pd.DataFrame) -> pd.DataFrame:
+    mu = df.mean(axis=1)
+    sd = df.std(axis=1).replace(0.0, np.nan)
+    return df.sub(mu, axis=0).div(sd, axis=0)
+
+
+def compute_bull_momentum_zscores(
+    panel: MarketPanel,
+    eligible: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Strictly causal cross-sectional z-scores of 120d-high proximity & 20d momentum (day-t close only)."""
+    hc = panel.hfq_close
+    raw_h120 = hc / hc.rolling(120, min_periods=40).max() - 1.0
+    raw_r20 = hc / hc.shift(20) - 1.0
+    z_h120 = _row_zscore_frame(raw_h120.where(eligible))
+    z_r20 = _row_zscore_frame(raw_r20.where(eligible))
+    return z_h120, z_r20
+
+
+def apply_bull_momentum_overlay(
+    scores: pd.Series,
+    regime: str,
+    z_h120_row: pd.Series | None,
+    z_r20_row: pd.Series | None,
+    w_h120: float = DEFAULT_BULL_MOM_H120_WEIGHT,
+    w_r20: float = DEFAULT_BULL_MOM_RET20_WEIGHT,
+) -> pd.Series:
+    """Apply mild momentum breakout tilt ONLY in confirmed OFFENSIVE bull regimes (zero effect otherwise).
+
+    Shared identically by AShareBacktestEngine and live RecommendationEngine so backtest and
+    14:40 live paper trading stay 100% aligned with zero look-ahead.
+    """
+    if regime != "OFFENSIVE" or (w_h120 <= 0.0 and w_r20 <= 0.0):
+        return scores
+    valid_mask = scores.notna()
+    if int(valid_mask.sum()) < 2:
+        return scores
+
+    s_mu = float(scores.mean())
+    s_sd = float(scores.std())
+    base_z = (scores - s_mu) / s_sd if (np.isfinite(s_sd) and s_sd > 1e-12) else scores.copy()
+
+    adj = base_z.copy()
+    if w_h120 > 0.0 and z_h120_row is not None:
+        adj = adj + float(w_h120) * z_h120_row.reindex(scores.index).fillna(0.0)
+    if w_r20 > 0.0 and z_r20_row is not None:
+        adj = adj + float(w_r20) * z_r20_row.reindex(scores.index).fillna(0.0)
+    adj = adj.where(valid_mask)
+
+    a_mu = float(adj.mean())
+    a_sd = float(adj.std())
+    if np.isfinite(a_sd) and a_sd > 1e-12:
+        return (adj - a_mu) / a_sd
+    return adj
