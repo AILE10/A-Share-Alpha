@@ -196,8 +196,9 @@ export const DashboardPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="h-96 flex items-center justify-center">
+      <div className="h-96 flex flex-col items-center justify-center gap-3">
         <Spin size="large" />
+        <div className="text-xs text-slate-400">正在加载策略总览、大盘实时状态与每日流程...</div>
       </div>
     );
   }

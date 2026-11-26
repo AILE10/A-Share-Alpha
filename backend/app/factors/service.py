@@ -56,8 +56,13 @@ class FactorEngine:
             analysis = analyze_factors(std, fwd, universe.eligible, horizon=horizon, status=factors.status)
         return FactorRunResult(panel=panel, universe=universe, factors=factors, std=std, analysis=analysis)
 
-    def persist(self, res: FactorRunResult, factor_values_tail_days: int | None = None) -> dict[str, int]:
-        uni = res.universe.to_long()
+    def persist(
+        self,
+        res: FactorRunResult,
+        factor_values_tail_days: int | None = None,
+        universe_tail_days: int | None = None,
+    ) -> dict[str, int]:
+        uni = res.universe.to_long(tail_n=universe_tail_days)
         n_uni = self.db.upsert_df("universe_daily", uni)
 
         # For full-market runs (>250 stocks), persist the trailing 60 trading days of raw/std factor_values

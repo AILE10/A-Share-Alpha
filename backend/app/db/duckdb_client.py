@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Sequence
@@ -210,27 +211,40 @@ class DuckDBClient:
             )
             return row[0] if row else None
 
-    def upsert_df(self, table_name: str, df: pd.DataFrame) -> int:
-        """Idempotently upsert DataFrame rows using INSERT OR REPLACE matching table columns."""
+    def upsert_df(self, table_name: str, df: pd.DataFrame, chunk_size: int = 200_000) -> int:
+        """Idempotently upsert DataFrame rows using INSERT OR REPLACE matching table columns.
+
+        Large DataFrames (> chunk_size) are committed in chunks with brief lock yields
+        between batches so concurrent read requests (Dashboard / Workflow / APIs) never freeze.
+        """
         if df is None or df.empty:
             return 0
         with self._lock:
             table_cols_df = self._conn.execute(f"PRAGMA table_info('{table_name}')").df()
             table_cols = list(table_cols_df["name"])
-            use_cols = [c for c in df.columns if c in table_cols]
-            if not use_cols:
-                raise ValueError(f"No matching columns for table {table_name}: {list(df.columns)}")
-            clean_df = df[use_cols].copy()
+        use_cols = [c for c in df.columns if c in table_cols]
+        if not use_cols:
+            raise ValueError(f"No matching columns for table {table_name}: {list(df.columns)}")
+        clean_df = df[use_cols].copy()
+        cols_sql = ", ".join(use_cols)
+        total = len(clean_df)
+        step = max(10_000, int(chunk_size))
+
+        for start_i in range(0, total, step):
+            chunk = clean_df.iloc[start_i : start_i + step]
             tmp_view = f"tmp_{uuid.uuid4().hex[:12]}"
-            self._conn.register(tmp_view, clean_df)
-            try:
-                cols_sql = ", ".join(use_cols)
-                self._conn.execute(
-                    f"INSERT OR REPLACE INTO {table_name} ({cols_sql}) SELECT {cols_sql} FROM {tmp_view}"
-                )
-            finally:
-                self._conn.unregister(tmp_view)
-            return len(clean_df)
+            with self._lock:
+                self._conn.register(tmp_view, chunk)
+                try:
+                    self._conn.execute(
+                        f"INSERT OR REPLACE INTO {table_name} ({cols_sql}) SELECT {cols_sql} FROM {tmp_view}"
+                    )
+                finally:
+                    self._conn.unregister(tmp_view)
+            if start_i + step < total:
+                # Briefly yield the lock so incoming UI/API read queries never starve
+                time.sleep(0.01)
+        return total
 
     def close(self) -> None:
         with self._lock:

@@ -416,7 +416,7 @@ def trigger_data_sync(req: SyncRequest) -> dict:
                     _both("正在重算最新收盘大盘择时状态与四维因子...", 0.86)
                     eng = FactorEngine(svc.db)
                     f_run = eng.build(codes=None, compute_analysis=True)
-                    eng.persist(f_run)
+                    eng.persist(f_run, factor_values_tail_days=5, universe_tail_days=5)
                     persist_market_regime(compute_market_regime(f_run.panel), svc.db)
                     get_realtime_regime_service().clear_cache()
                     try:

@@ -34,7 +34,7 @@ class UniverseResult:
     mcap_pct_rank: pd.DataFrame
     list_days: pd.DataFrame
 
-    def to_long(self) -> pd.DataFrame:
+    def to_long(self, tail_n: int | None = None) -> pd.DataFrame:
         frames = {
             "is_eligible": self.eligible,
             "exclude_reason": self.reason,
@@ -44,7 +44,8 @@ class UniverseResult:
         }
         parts = []
         for name, df in frames.items():
-            s = df.stack(future_stack=True)
+            sub_df = df.iloc[-tail_n:] if (tail_n and len(df) > tail_n) else df
+            s = sub_df.stack(future_stack=True)
             s.name = name
             parts.append(s)
         out = pd.concat(parts, axis=1).reset_index()

@@ -69,7 +69,7 @@ class StudioScheduler:
             logger.error("pre_market job failed: %s", exc)
 
     def _job_intraday(self) -> None:
-        if not (self._is_open_today() and is_trading_session()):
+        if not (is_trading_session() and self._is_open_today()):
             return
         wf = get_workflow_tracker()
         try:
@@ -92,7 +92,7 @@ class StudioScheduler:
             logger.error("intraday_refresh job failed: %s", exc)
 
     def _job_realtime_regime(self) -> None:
-        if not (self._is_open_today() and is_trading_session()):
+        if not (is_trading_session() and self._is_open_today()):
             return
         try:
             snap = get_realtime_regime_service().refresh(db=self.paper.db, broadcast=True)
@@ -146,7 +146,10 @@ class StudioScheduler:
                 rep = svc.incremental_sync()
                 eng = FactorEngine(db)
                 f_run = eng.build(codes=None, compute_analysis=True)
-                eng.persist(f_run)
+                # Daily incremental sync only needs to persist the trailing 5 trading days of
+                # universe_daily & factor_values (full factor_ic_daily is always persisted),
+                # avoiding rewriting 8M+ historical rows and starving UI reads.
+                eng.persist(f_run, factor_values_tail_days=5, universe_tail_days=5)
                 reg_df = compute_market_regime(f_run.panel)
                 persist_market_regime(reg_df, db)
                 get_realtime_regime_service().clear_cache()

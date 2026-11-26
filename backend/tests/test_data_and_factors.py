@@ -278,3 +278,22 @@ class TestAnalytics:
         uni = apply_universe_filter(mod_panel, UniverseConfig(min_price=2.5))
         assert not bool(uni.eligible.loc[last_dt, target_code])
         assert "PENNY_STOCK_2.5" in str(uni.reason.loc[last_dt, target_code])
+
+    def test_chunked_upsert_and_incremental_factor_persist(self, tmp_path, factor_run):
+        from app.db.duckdb_client import DuckDBClient
+        from app.factors.service import FactorEngine
+
+        tmp_db = DuckDBClient(tmp_path / "chunk_test.duckdb")
+        try:
+            eng = FactorEngine(tmp_db)
+            counts = eng.persist(factor_run, factor_values_tail_days=5, universe_tail_days=5)
+            n_codes = len(factor_run.panel.codes)
+            assert counts["universe_daily"] == min(5, len(factor_run.panel.dates)) * n_codes
+            assert counts["factor_values"] > 0
+            assert counts["factor_ic_daily"] > 0
+            distinct_uni_days = int(tmp_db.query_scalar("SELECT COUNT(DISTINCT trade_date) FROM universe_daily"))
+            distinct_fv_days = int(tmp_db.query_scalar("SELECT COUNT(DISTINCT trade_date) FROM factor_values"))
+            assert distinct_uni_days == min(5, len(factor_run.panel.dates))
+            assert distinct_fv_days == min(5, len(factor_run.panel.dates))
+        finally:
+            tmp_db.close()
