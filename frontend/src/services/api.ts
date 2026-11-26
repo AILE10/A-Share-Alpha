@@ -6,9 +6,16 @@ export const http = axios.create({
 });
 
 export const api = {
+  // Unified Background Action Tasks (live progress)
+  listActionTasks: (activeOnly = false, kind?: string) =>
+    http.get('/tasks', { params: { active_only: activeOnly, ...(kind ? { kind } : {}) } }).then((r) => r.data),
+  getActionTask: (taskId: string) =>
+    http.get(`/tasks/${encodeURIComponent(taskId)}`).then((r) => r.data),
+
   // Dashboard & Data
   getDashboardSummary: () => http.get('/dashboard/summary').then((r) => r.data),
   refreshRealtimeRegime: () => http.post('/dashboard/regime/refresh').then((r) => r.data),
+  refreshRealtimeRegimeAsync: () => http.post('/dashboard/regime/refresh-async').then((r) => r.data),
   getDataStatus: () => http.get('/data/status').then((r) => r.data),
   triggerDataSync: (
     mode: 'incremental' | 'active_market' | 'sample_60' | 'top100_snapshot' = 'incremental',
@@ -22,6 +29,7 @@ export const api = {
     http.get(`/factors/${name}/detail`, { params: { horizon } }).then((r) => r.data),
   getFactorCorrelation: () => http.get('/factors/correlation').then((r) => r.data),
   recomputeFactors: (horizon = 5) => http.post('/factors/compute', { horizon }).then((r) => r.data),
+  recomputeFactorsAsync: (horizon = 5) => http.post('/factors/compute-async', { horizon }).then((r) => r.data),
 
   // Backtest & Optimization
   listBacktestRuns: () => http.get('/backtest/runs').then((r) => r.data),
@@ -40,6 +48,8 @@ export const api = {
   getLatestSignals: () => http.get('/signals/latest').then((r) => r.data),
   refreshSignals: (fetchLiveQuotes = true) =>
     http.post('/signals/refresh', null, { params: { fetch_live_quotes: fetchLiveQuotes } }).then((r) => r.data),
+  refreshSignalsAsync: (fetchLiveQuotes = true) =>
+    http.post('/signals/refresh-async', null, { params: { fetch_live_quotes: fetchLiveQuotes } }).then((r) => r.data),
   getStockKLine: (tsCode: string, limit = 160) =>
     http.get(`/signals/kline/${encodeURIComponent(tsCode)}`, { params: { limit } }).then((r) => r.data),
 
@@ -47,8 +57,11 @@ export const api = {
   getPaperAccount: () => http.get('/paper/account').then((r) => r.data),
   getPaperNav: () => http.get('/paper/nav').then((r) => r.data),
   triggerIntradayRefresh: () => http.post('/paper/intraday-refresh').then((r) => r.data),
+  triggerIntradayRefreshAsync: () => http.post('/paper/intraday-refresh-async').then((r) => r.data),
   triggerPaperRebalance: (fetchLiveQuotes = true) =>
     http.post('/paper/rebalance', { fetch_live_quotes: fetchLiveQuotes }).then((r) => r.data),
+  triggerPaperRebalanceAsync: (fetchLiveQuotes = true) =>
+    http.post('/paper/rebalance-async', { fetch_live_quotes: fetchLiveQuotes }).then((r) => r.data),
   resetPaperAccount: (initialCash = 300_000, clearReviews = true, clearSignals = true, clearAuditLogs = true) =>
     http
       .post('/paper/reset', {
@@ -60,9 +73,12 @@ export const api = {
       .then((r) => r.data),
   listWeeklyReviews: () => http.get('/paper/reviews').then((r) => r.data),
   generateWeeklyReview: () => http.post('/paper/reviews/generate').then((r) => r.data),
+  generateWeeklyReviewAsync: () => http.post('/paper/reviews/generate-async').then((r) => r.data),
   listModelVersions: () => http.get('/models/versions').then((r) => r.data),
-  retrainModel: (modelType = 'regression', notes = '工作台一键滚动重训') =>
+  retrainModel: (modelType = 'regression', notes = '工作台一键滚动重训 (Huber 10d · 6-Seed Bagging)') =>
     http.post('/models/retrain', { model_type: modelType, notes }).then((r) => r.data),
+  retrainModelAsync: (modelType = 'regression', notes = '工作台一键滚动重训 (Huber 10d · 6-Seed Bagging)') =>
+    http.post('/models/retrain-async', { model_type: modelType, notes }).then((r) => r.data),
   activateModelVersion: (versionId: string) =>
     http.post(`/models/${encodeURIComponent(versionId)}/activate`).then((r) => r.data),
   getSchedulerJobs: () => http.get('/scheduler/jobs').then((r) => r.data),

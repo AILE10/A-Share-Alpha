@@ -6,6 +6,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Progress,
   Radio,
   Select,
   Spin,
@@ -32,6 +33,8 @@ export const BrokerRiskPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [savingBroker, setSavingBroker] = useState(false);
   const [savingRisk, setSavingRisk] = useState(false);
+  const [busyAction, setBusyAction] = useState<string>('');
+  const [busyLabel, setBusyLabel] = useState<string>('');
   const [fillTarget, setFillTarget] = useState<any | null>(null);
 
   const [brokerForm] = Form.useForm();
@@ -93,29 +96,56 @@ export const BrokerRiskPage: React.FC = () => {
   };
 
   const handleTestWebhook = async () => {
+    setBusyAction('webhook');
+    setBusyLabel('正在测试推送企业微信 / 钉钉 Webhook 通知...');
     try {
       const res = await api.testWebhooks();
       const summary = (res.results || []).map((r: any) => `${r.channel}: ${r.sent ? '成功' : r.reason || r.error}`).join(' | ');
       message.info(summary);
     } catch {
       message.error('Webhook 测试请求失败');
+    } finally {
+      setBusyAction('');
+      setBusyLabel('');
+    }
+  };
+
+  const handleResetFuse = async () => {
+    setBusyAction('fuse');
+    setBusyLabel('正在复位组合回撤熔断水位...');
+    try {
+      await api.resetDrawdownFuse();
+      message.success('已手动复位组合回撤熔断状态为 NORMAL');
+      await loadAll();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '复位回撤熔断失败');
+    } finally {
+      setBusyAction('');
+      setBusyLabel('');
     }
   };
 
   const handleConfirmFill = async () => {
     if (!fillTarget) return;
+    setBusyAction('fill');
+    setBusyLabel(`正在回写实盘成交 (${fillTarget.ts_code})...`);
     try {
       const vals = await fillForm.validateFields();
       await api.confirmAssistedFill(fillTarget.order_id, vals);
       message.success(`实盘成交已回写持仓账本 (${fillTarget.ts_code})`);
       setFillTarget(null);
-      loadAll();
+      await loadAll();
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '回写失败');
+    } finally {
+      setBusyAction('');
+      setBusyLabel('');
     }
   };
 
   const handleManualTestOrder = async () => {
+    setBusyAction('manual');
+    setBusyLabel('正在经前置风控中间件校验并提交测试委托...');
     try {
       const vals = await manualForm.validateFields();
       const res = await api.submitManualOrder(vals);
@@ -124,9 +154,12 @@ export const BrokerRiskPage: React.FC = () => {
       } else {
         message.success(`委托状态: ${res.status} (${res.order_id})`);
       }
-      loadAll();
+      await loadAll();
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '测试委托失败');
+    } finally {
+      setBusyAction('');
+      setBusyLabel('');
     }
   };
 
@@ -156,12 +189,21 @@ export const BrokerRiskPage: React.FC = () => {
         description="本系统仅提供本地模拟盘（Paper）、半自动人工辅助下单与 Webhook 提醒（Assisted），以及面向已开通券商官方程序化权限账户的迅投 MiniQMT / 恒生 PTrade 合规桥接骨架（默认 Dry-Run 安全模式）。"
       />
 
+      {(busyAction || savingBroker || savingRisk) && (
+        <div className="quant-card px-3 py-2 border border-sky-500/40 bg-sky-950/20">
+          <div className="text-xs text-sky-300 mb-1">
+            {busyLabel || (savingBroker ? '正在保存券商网关与通知配置...' : '正在保存前置风控中间件阈值...')}
+          </div>
+          <Progress percent={75} size="small" status="active" showInfo={false} strokeColor="#38BDF8" trailColor="#1E293B" />
+        </div>
+      )}
+
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* Broker Mode & Webhook / QMT Config */}
         <div className="quant-card p-4 space-y-4">
           <div className="flex items-center justify-between">
             <span className="text-sm font-semibold text-slate-100">券商执行模式与通知通道</span>
-            <Button size="small" icon={<BellOutlined />} onClick={handleTestWebhook}>
+            <Button size="small" icon={<BellOutlined />} loading={busyAction === 'webhook'} onClick={handleTestWebhook}>
               测试 Webhook 推送
             </Button>
           </div>
@@ -229,11 +271,8 @@ export const BrokerRiskPage: React.FC = () => {
             <Button
               size="small"
               icon={<UndoOutlined />}
-              onClick={async () => {
-                await api.resetDrawdownFuse();
-                message.success('已手动复位组合回撤熔断状态为 NORMAL');
-                loadAll();
-              }}
+              loading={busyAction === 'fuse'}
+              onClick={handleResetFuse}
             >
               复位回撤熔断
             </Button>
@@ -293,7 +332,7 @@ export const BrokerRiskPage: React.FC = () => {
               <Form.Item name="ref_price">
                 <InputNumber min={0.01} step={0.5} style={{ width: 95 }} placeholder="参考价(可选)" />
               </Form.Item>
-              <Button size="small" type="default" onClick={handleManualTestOrder}>
+              <Button size="small" type="default" loading={busyAction === 'manual'} onClick={handleManualTestOrder}>
                 测试提交
               </Button>
             </Form>
@@ -336,10 +375,18 @@ export const BrokerRiskPage: React.FC = () => {
                   <Button
                     size="small"
                     danger
+                    loading={busyAction === `cancel:${r.order_id}`}
                     onClick={async () => {
-                      await api.cancelAssistedOrder(r.order_id);
-                      message.info('已撤销待确认辅助单');
-                      loadAll();
+                      setBusyAction(`cancel:${r.order_id}`);
+                      setBusyLabel(`正在撤销待确认辅助单 (${r.ts_code})...`);
+                      try {
+                        await api.cancelAssistedOrder(r.order_id);
+                        message.info('已撤销待确认辅助单');
+                        await loadAll();
+                      } finally {
+                        setBusyAction('');
+                        setBusyLabel('');
+                      }
                     }}
                   >
                     撤单
@@ -376,6 +423,7 @@ export const BrokerRiskPage: React.FC = () => {
         title={`录入实盘成交回写 · ${fillTarget?.ts_code} ${fillTarget?.name || ''}`}
         onCancel={() => setFillTarget(null)}
         onOk={handleConfirmFill}
+        okButtonProps={{ loading: busyAction === 'fill' }}
         okText="确认回写持仓"
       >
         <Form form={fillForm} layout="vertical">

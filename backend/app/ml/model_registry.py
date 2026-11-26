@@ -7,6 +7,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import lightgbm as lgb
 
@@ -162,9 +163,16 @@ class ModelRegistry:
         duckdb_client: DuckDBClient | None = None,
         label_horizon: int = 10,
         ensemble_seeds: tuple[int, ...] = DEFAULT_ENSEMBLE_SEEDS,
+        progress_cb: Callable[[str, float], None] | None = None,
     ) -> tuple[dict, WalkForwardMLResult]:
+        def _emit(stage: str, pct: float) -> None:
+            if progress_cb is not None:
+                progress_cb(stage, pct)
+
         db = duckdb_client or get_duckdb()
-        f_run = FactorEngine(db).build(codes=codes, horizon=label_horizon)
+        _emit("正在加载全市场行情面板并计算四维 20 因子...", 0.08)
+        f_run = FactorEngine(db).build(codes=codes, horizon=label_horizon, compute_analysis=False)
+        _emit(f"正在构建 {len(f_run.panel.codes)} 股未来 {label_horizon} 日超额标签...", 0.22)
         fwd_ex = forward_excess_returns(f_run.panel, horizon=label_horizon)
         embargo = max(5, int(label_horizon))
         cfg = LGBMConfig(
@@ -175,7 +183,14 @@ class ModelRegistry:
             feature_names=feature_names if feature_names else list(f_run.std.keys()),
         )
         scorer = LGBMScorer(cfg)
-        ml_res = scorer.run_walk_forward(f_run.std, fwd_ex, f_run.universe.eligible, adaptive=True)
+        ml_res = scorer.run_walk_forward(
+            f_run.std,
+            fwd_ex,
+            f_run.universe.eligible,
+            adaptive=True,
+            progress_cb=lambda msg, p: _emit(msg, 0.25 + 0.68 * p),
+        )
+        _emit("正在落盘模型快照并切换激活版本...", 0.96)
         saved = self.save_version(ml_res, model_type=model_type, embargo_days=embargo, activate=True, notes=notes)
         return saved, ml_res
 

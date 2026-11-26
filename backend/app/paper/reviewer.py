@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import timedelta
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,7 @@ from app.backtest.engine import AShareBacktestEngine, BacktestConfig
 from app.core.calendar import today_cn
 from app.core.constants import FACTOR_META_MAP
 from app.db.duckdb_client import DuckDBClient, get_duckdb
-from app.db.models import PaperNavDaily, PaperOrder, WeeklyReview
+from app.db.models import BacktestRun, PaperNavDaily, PaperOrder, WeeklyReview
 from app.db.sqlite_client import SQLiteDatabase, get_sqlite_db
 from app.factors.definitions import forward_excess_returns
 from app.factors.service import FactorEngine, to_jsonable
@@ -34,7 +35,17 @@ class WeeklyReviewEngine:
         self.db = duckdb_client or get_duckdb()
         self.sqlite = sqlite_db or get_sqlite_db()
 
-    def generate_review(self, account_id: str = "default_paper", lookback_days: int = 7) -> dict:
+    def generate_review(
+        self,
+        account_id: str = "default_paper",
+        lookback_days: int = 7,
+        progress_cb: Callable[[str, float], None] | None = None,
+    ) -> dict:
+        def _emit(stage: str, pct: float) -> None:
+            if progress_cb is not None:
+                progress_cb(stage, pct)
+
+        _emit("正在汇总模拟实盘净值、滑点损耗与涨跌停漏单统计...", 0.12)
         end_d = today_cn()
         start_d = end_d - timedelta(days=lookback_days)
 
@@ -81,27 +92,55 @@ class WeeklyReviewEngine:
         missed_fill_impact = round(len(rejected_limit) * 0.0015, 6)  # ~15 bps opportunity drag per limit-locked miss
 
         # 2) Theoretical backtest return over the same recent trading window
+        # Prefer the latest persisted full-market BacktestRun (or cached AlphaStrategyService) to avoid
+        # 200+ second synchronous 6-seed retraining on every weekly review click.
+        _emit("正在对齐同期理论回测基准收益...", 0.35)
         theory_bt_ret = 0.0
+        used_persisted = False
         try:
-            f_run = FactorEngine(self.db).build(horizon=10)
-            fwd_ex = forward_excess_returns(f_run.panel, horizon=10)
-            ml_res = LGBMScorer(LGBMConfig(mode="regression", label_horizon=10, embargo_days=10)).run_walk_forward(
-                f_run.std, fwd_ex, f_run.universe.eligible, adaptive=True
-            )
-            tech = compute_technical_signals(f_run.panel)
-            reg = compute_market_regime(f_run.panel)
-            bt = AShareBacktestEngine(BacktestConfig()).run(
-                f_run.panel, ml_res.oos_scores, f_run.universe.eligible, tech, reg
-            )
-            if len(bt.daily_nav) >= 2:
-                tail = bt.daily_nav.tail(min(6, len(bt.daily_nav)))
-                theory_bt_ret = float(tail.iloc[-1] / tail.iloc[0] - 1.0)
+            with self.sqlite.session_scope() as session:
+                latest_bt = (
+                    session.query(BacktestRun)
+                    .filter(BacktestRun.status == "DONE")
+                    .order_by(BacktestRun.created_at.desc())
+                    .first()
+                )
+                bt_curve = json.loads(latest_bt.equity_curve_json or "[]") if latest_bt is not None else []
+            if len(bt_curve) >= 2:
+                window_pts = [pt for pt in bt_curve if str(pt.get("date", "")) >= w_start]
+                if len(window_pts) < 2:
+                    window_pts = bt_curve[-min(6, len(bt_curve)):]
+                nav0 = float(window_pts[0].get("nav") or window_pts[0].get("equity") or 1.0)
+                nav1 = float(window_pts[-1].get("nav") or window_pts[-1].get("equity") or 1.0)
+                if nav0 > 0:
+                    theory_bt_ret = float(nav1 / nav0 - 1.0)
+                    used_persisted = True
         except Exception:  # noqa: BLE001
-            theory_bt_ret = paper_ret
+            used_persisted = False
+
+        if not used_persisted:
+            try:
+                from app.strategy.alpha_strategy import AlphaStrategyService
+
+                _emit("未命中已持久化回测，正在通过二级缓存计算近期理论基准...", 0.48)
+                svc = AlphaStrategyService(self.db)
+                bundle = svc.run_full_pipeline(
+                    lgbm_config=LGBMConfig(mode="regression", label_horizon=10, embargo_days=10),
+                    bt_config=BacktestConfig(),
+                    include_ew_compare=False,
+                    include_heatmap=False,
+                    use_cache=True,
+                )
+                if len(bundle.backtest.daily_nav) >= 2:
+                    tail = bundle.backtest.daily_nav.tail(min(6, len(bundle.backtest.daily_nav)))
+                    theory_bt_ret = float(tail.iloc[-1] / tail.iloc[0] - 1.0)
+            except Exception:  # noqa: BLE001
+                theory_bt_ret = paper_ret
 
         tracking_error = round(paper_ret - theory_bt_ret, 6)
 
         # 3) Rolling 20-day Factor IC Decay Detection from DuckDB factor_ic_daily
+        _emit("正在扫描四维 20 因子近 20 日 IC 衰减与反转预警...", 0.72)
         ic_df = self.db.query_df(
             "SELECT trade_date, factor_name, ic, rank_ic FROM factor_ic_daily ORDER BY factor_name, trade_date"
         )

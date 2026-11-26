@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.broker.gateway import BrokerGateway
 from app.config import get_settings
+from app.core.task_manager import action_task_manager
 from app.db.duckdb_client import get_duckdb
 from app.db.sqlite_client import get_sqlite_db
 from app.factors.service import to_jsonable
@@ -21,7 +22,7 @@ router = APIRouter(tags=["Paper Trading, Review & Models"])
 
 class RetrainRequest(BaseModel):
     model_type: str = "regression"
-    notes: str = "工作台一键滚动重训 (Huber 10d · 3-Seed Bagging)"
+    notes: str = "工作台一键滚动重训 (Huber 10d · 6-Seed Bagging)"
 
 
 class RebalanceRequest(BaseModel):
@@ -58,10 +59,40 @@ def trigger_intraday_refresh() -> dict:
     return to_jsonable(paper.intraday_refresh(candidate_codes=_sample_codes()))
 
 
+@router.post("/paper/intraday-refresh-async")
+def trigger_intraday_refresh_async() -> dict:
+    def _run(emit):
+        paper = PaperTradingService(get_duckdb(), get_sqlite_db())
+        return paper.intraday_refresh(candidate_codes=_sample_codes(), progress_cb=emit)
+
+    return action_task_manager.submit(
+        kind="paper_intraday",
+        title="盘中快照盯市与大盘刷新",
+        fn=_run,
+    )
+
+
 @router.post("/paper/rebalance")
 def trigger_paper_rebalance(req: RebalanceRequest = RebalanceRequest()) -> dict:
     paper = PaperTradingService(get_duckdb(), get_sqlite_db())
     return to_jsonable(paper.run_rebalance(codes=_sample_codes(), fetch_live_quotes=req.fetch_live_quotes))
+
+
+@router.post("/paper/rebalance-async")
+def trigger_paper_rebalance_async(req: RebalanceRequest = RebalanceRequest()) -> dict:
+    def _run(emit):
+        paper = PaperTradingService(get_duckdb(), get_sqlite_db())
+        return paper.run_rebalance(
+            codes=_sample_codes(),
+            fetch_live_quotes=req.fetch_live_quotes,
+            progress_cb=emit,
+        )
+
+    return action_task_manager.submit(
+        kind="paper_rebalance",
+        title="14:40 全市场选股与模拟盘调仓",
+        fn=_run,
+    )
 
 
 @router.post("/paper/reset")
@@ -93,6 +124,19 @@ def generate_weekly_review() -> dict:
     return to_jsonable(eng.generate_review())
 
 
+@router.post("/paper/reviews/generate-async")
+def generate_weekly_review_async() -> dict:
+    def _run(emit):
+        eng = WeeklyReviewEngine(get_duckdb(), get_sqlite_db())
+        return eng.generate_review(progress_cb=emit)
+
+    return action_task_manager.submit(
+        kind="weekly_review",
+        title="周度复盘与 20 日因子衰减归因",
+        fn=_run,
+    )
+
+
 @router.get("/models/versions")
 def list_model_versions() -> list[dict]:
     reg = ModelRegistry(get_sqlite_db())
@@ -112,6 +156,26 @@ def retrain_model(req: RetrainRequest) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"模型重训失败: {exc}") from exc
     return to_jsonable(saved)
+
+
+@router.post("/models/retrain-async")
+def retrain_model_async(req: RetrainRequest) -> dict:
+    def _run(emit):
+        reg = ModelRegistry(get_sqlite_db())
+        saved, _ = reg.retrain_and_register(
+            codes=_sample_codes(),
+            model_type=req.model_type,
+            notes=req.notes,
+            duckdb_client=get_duckdb(),
+            progress_cb=emit,
+        )
+        return saved
+
+    return action_task_manager.submit(
+        kind="model_retrain",
+        title=f"全市场 Purged Walk-Forward 滚动重训 ({req.model_type})",
+        fn=_run,
+    )
 
 
 @router.post("/models/{version_id}/activate")

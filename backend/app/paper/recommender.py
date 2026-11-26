@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -84,6 +85,7 @@ class RecommendationEngine:
         account_id: str = "default_paper",
         codes: list[str] | None = None,
         live_quotes: pd.DataFrame | None = None,
+        fetch_live_quotes_fn: Callable[[list[str]], pd.DataFrame | None] | None = None,
         portfolio_config: PortfolioConfig | None = None,
         dynamic_config: DynamicHoldingConfig | None = None,
         use_dynamic_holding: bool = True,
@@ -91,12 +93,20 @@ class RecommendationEngine:
         atr_mult: float = 2.5,
         persist: bool = True,
         broadcast: bool = True,
+        progress_cb: Callable[[str, float], None] | None = None,
     ) -> RecommendationBundle:
+        def _emit(stage: str, pct: float) -> None:
+            if progress_cb is not None:
+                progress_cb(stage, pct)
+
+        _emit("正在加载当前激活 6-Seed LightGBM 生产模型...", 0.06)
         booster, model_meta = self._ensure_active_model(codes=codes)
         feats = model_meta.get("feature_list") or list(ALL_FACTOR_NAMES)
 
-        f_run = FactorEngine(self.db).build(codes=codes)
+        _emit("正在加载全市场行情面板并计算四维 20 因子与中性化...", 0.16)
+        f_run = FactorEngine(self.db).build(codes=codes, compute_analysis=False)
         panel = f_run.panel
+        _emit(f"正在计算 {len(panel.codes)} 只真股技术面防追高共振与大盘择时...", 0.36)
         tech = compute_technical_signals(panel)
         regime_df = compute_market_regime(panel)
         persist_market_regime(regime_df, self.db)
@@ -118,12 +128,14 @@ class RecommendationEngine:
             "is_realtime": False,
         }
         # During live 14:40 rebalance / live signal refresh, align target exposure with real-time intraday regime
-        if live_quotes is not None:
+        use_live_regime = (live_quotes is not None) or (fetch_live_quotes_fn is not None)
+        if use_live_regime:
             try:
                 from app.strategy.realtime_regime import get_realtime_regime_service
 
+                _emit("正在同步全市场实时大盘状态与宽度 (含沪深300二八分化)...", 0.48)
                 rt_svc = get_realtime_regime_service()
-                rt_snap = rt_svc.get_cached(max_age_seconds=120.0) or rt_svc.refresh(db=self.db, broadcast=True)
+                rt_snap = rt_svc.get_cached(max_age_seconds=90.0) or rt_svc.refresh(db=self.db, broadcast=True)
                 if rt_snap and rt_snap.get("trade_date", "") >= latest_str:
                     regime_info = {
                         **regime_info,
@@ -146,7 +158,8 @@ class RecommendationEngine:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Live realtime regime overlay skipped; falling back to EOD regime: %s", exc)
 
-        # Score latest cross-section + exact per-stock TreeSHAP contributions
+        # Score latest cross-section + exact per-stock TreeSHAP contributions (computed ONCE!)
+        _emit("正在执行 6-Seed LightGBM 截面推理与 TreeSHAP 归因...", 0.60)
         latest_df = build_ml_dataset(
             f_run.std,
             f_run.universe.eligible,
@@ -185,6 +198,18 @@ class RecommendationEngine:
             pos_rows = session.query(PaperPosition).filter(PaperPosition.account_id == account_id).all()
         held_map = {p.ts_code: p for p in pos_rows if p.total_shares > 0}
         held_set = set(held_map.keys())
+
+        # Single-pass live quote fetch for holdings + Top-100 scored candidates (avoids rebuilding factors twice!)
+        top_candidates = list(score_series.sort_values(ascending=False).index[:100])
+        if live_quotes is None and fetch_live_quotes_fn is not None:
+            watch_codes = list(dict.fromkeys([*held_set, *top_candidates]))[:100]
+            _emit(f"正在拉取持仓与 Top-{len(watch_codes)} 候选股盘中实时 L1 行情快照...", 0.72)
+            try:
+                live_quotes = fetch_live_quotes_fn(watch_codes)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Single-pass live quote fetch failed, falling back to DuckDB EOD close: %s", exc)
+                live_quotes = None
+        _emit("正在执行动态持有过滤、风控仓位校验与风险平价优化...", 0.84)
 
         # Optional live quote price overlay (real Top-100 snapshot!)
         quote_map: dict[str, dict] = {}
@@ -433,13 +458,14 @@ class RecommendationEngine:
             return items
 
         recommendations: list[dict] = []
+        signal_date_str = str(regime_info.get("trade_date") or latest_str)
 
         # 1) BUY & HOLD targets (if target_exposure == 0 on extreme crash day, still surface Top-5
         #    candidates with 0% weight & full SHAP/technical attribution so investor sees clear watch cards)
         display_codes = selected if selected else list(score_series.sort_values(ascending=False).index[:5])
         for code in display_codes:
             tw = target_weights.get(code, 0.0)
-            if tw <= 1e-5 and float(reg_row["target_exposure"]) > 1e-5:
+            if tw <= 1e-5 and target_exp > 1e-5:
                 continue
             px = _ref_price(code)
             atr = (
@@ -462,7 +488,7 @@ class RecommendationEngine:
 
             recommendations.append({
                 "signal_id": f"sig_{uuid.uuid4().hex[:12]}",
-                "trade_date": latest_str,
+                "trade_date": signal_date_str,
                 "ts_code": code,
                 "name": str(names.get(code, code)),
                 "sw_l1_name": str(industries.get(code, "未分类")),
@@ -495,7 +521,7 @@ class RecommendationEngine:
             )
             recommendations.append({
                 "signal_id": f"sig_{uuid.uuid4().hex[:12]}",
-                "trade_date": latest_str,
+                "trade_date": signal_date_str,
                 "ts_code": code,
                 "name": pos.name or str(names.get(code, code)),
                 "sw_l1_name": pos.sw_l1_name or str(industries.get(code, "未分类")),
@@ -517,6 +543,7 @@ class RecommendationEngine:
         recommendations.sort(key=lambda r: (action_prio.get(r["action"], 9), r["composite_rank"]))
 
         if persist:
+            _emit("正在落盘可解释推荐清单并推送实时信号...", 0.94)
             with self.sqlite.session_scope() as session:
                 session.query(SignalRecommendation).filter(SignalRecommendation.status == "ACTIVE").update(
                     {SignalRecommendation.status: "ARCHIVED"}
@@ -543,12 +570,11 @@ class RecommendationEngine:
                         )
                     )
 
-        top_candidates = list(score_series.sort_values(ascending=False).index[:100])
         if broadcast:
             ws_manager.broadcast_threadsafe(
                 "recommendations",
                 to_jsonable({
-                    "trade_date": latest_str,
+                    "trade_date": signal_date_str,
                     "regime": regime_info,
                     "model_version_id": model_meta["version_id"],
                     "items": recommendations,
@@ -557,7 +583,7 @@ class RecommendationEngine:
             ws_manager.broadcast_threadsafe("market_regime", to_jsonable(regime_info))
 
         return RecommendationBundle(
-            trade_date=latest_str,
+            trade_date=signal_date_str,
             regime=regime_info,
             model_version_id=model_meta["version_id"],
             recommendations=recommendations,

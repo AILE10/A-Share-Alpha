@@ -106,9 +106,14 @@ class StudioScheduler:
                             "is_realtime": False,
                             "regime": str(last["regime"]),
                             "target_exposure": float(last["target_exposure"]),
+                            "style_mode": str(last["style_mode"]) if "style_mode" in last.index and last["style_mode"] == last["style_mode"] else "ALL_CAP",
+                            "min_mcap_quantile": float(last["min_mcap_quantile"]) if "min_mcap_quantile" in last.index and last["min_mcap_quantile"] == last["min_mcap_quantile"] else 0.0,
                             "csi1000_close": round(float(last["csi1000_close"]), 2),
                             "csi1000_ma20": round(float(last["csi1000_ma20"]), 2) if last["csi1000_ma20"] == last["csi1000_ma20"] else None,
                             "csi1000_ma60": round(float(last["csi1000_ma60"]), 2) if last["csi1000_ma60"] == last["csi1000_ma60"] else None,
+                            "csi300_close": round(float(last["csi300_close"]), 2) if "csi300_close" in last.index and last["csi300_close"] == last["csi300_close"] else None,
+                            "csi300_ma20": round(float(last["csi300_ma20"]), 2) if "csi300_ma20" in last.index and last["csi300_ma20"] == last["csi300_ma20"] else None,
+                            "csi300_ma60": round(float(last["csi300_ma60"]), 2) if "csi300_ma60" in last.index and last["csi300_ma60"] == last["csi300_ma60"] else None,
                             "breadth_above_ma20": round(float(last["breadth_above_ma20"]), 4),
                         }),
                     )
@@ -167,9 +172,24 @@ class StudioScheduler:
             self.scheduler.start()
             self._started = True
             logger.info("StudioScheduler started with %d jobs", len(self.scheduler.get_jobs()))
-            # If started mid-session on a trading day, warm up live Market Regime asynchronously
-            if self._is_open_today() and is_trading_session():
-                threading.Thread(target=self._job_realtime_regime, daemon=True, name="regime_warmup").start()
+            # Always warm up the latest full-market live/closing Market Regime asynchronously on startup
+            # (when DuckDB has synced index history) so pre-market, lunch, post-close and weekend views
+            # never stay stuck on an older DuckDB date.
+            has_idx = False
+            try:
+                has_idx = int(self.paper.db.query_scalar("SELECT COUNT(*) FROM index_daily") or 0) > 0
+            except Exception:  # noqa: BLE001
+                has_idx = False
+            if has_idx:
+                def _startup_regime_warmup() -> None:
+                    try:
+                        if not self._started:
+                            return
+                        get_realtime_regime_service().refresh(db=self.paper.db, broadcast=True)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Startup realtime regime warmup skipped: %s", exc)
+
+                threading.Thread(target=_startup_regime_warmup, daemon=True, name="regime_warmup").start()
 
     def list_jobs(self) -> list[dict]:
         return [

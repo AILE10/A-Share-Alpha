@@ -4,6 +4,8 @@ and daily NAV ledger persistence."""
 
 from __future__ import annotations
 
+from typing import Callable
+
 import pandas as pd
 
 from app.api.ws_manager import ws_manager
@@ -138,9 +140,19 @@ class PaperTradingService:
         logger.info("Pre-market T+1 unlock completed: %d positions unlocked", unlocked)
         return unlocked
 
-    def intraday_refresh(self, account_id: str = "default_paper", candidate_codes: list[str] | None = None) -> dict:
+    def intraday_refresh(
+        self,
+        account_id: str = "default_paper",
+        candidate_codes: list[str] | None = None,
+        progress_cb: Callable[[str, float], None] | None = None,
+    ) -> dict:
         """Intraday job: fetch real quotes ONLY for held positions + candidate Top 100,
         mark-to-market positions, detect hard/ATR stop-loss triggers, update drawdown & fuse."""
+        def _emit(stage: str, pct: float) -> None:
+            if progress_cb is not None:
+                progress_cb(stage, pct)
+
+        _emit("正在读取当前持仓与 Top-100 关注股票池...", 0.12)
         with self.sqlite.session_scope() as session:
             positions = session.query(PaperPosition).filter(PaperPosition.account_id == account_id).all()
             held_codes = [p.ts_code for p in positions if p.total_shares > 0]
@@ -155,11 +167,13 @@ class PaperTradingService:
 
         quotes_df = pd.DataFrame()
         if watch_codes:
+            _emit(f"正在拉取 {len(watch_codes)} 只持仓与候选股盘中实时 L1 行情...", 0.30)
             try:
                 quotes_df = self.sync_service.snapshot_top(watch_codes, max_n=100)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Intraday snapshot_top failed, using latest DuckDB close: %s", exc)
 
+        _emit("正在更新持仓实时盯市、止损红线与回撤熔断水位...", 0.55)
         quote_map = {str(r["ts_code"]): r.to_dict() for _, r in quotes_df.iterrows()} if not quotes_df.empty else {}
         risk_cfg = self.gateway.risk.get_config()
         stop_alerts: list[dict] = []
@@ -193,14 +207,19 @@ class PaperTradingService:
                         })
 
             PaperBrokerAdapter._recompute_account_equity(session, acct)
+            # Preserve sticky HALTED state until equity recovers comfortably above half-warning or manual reset
             if acct.current_drawdown <= -risk_cfg["drawdown_halt_pct"]:
                 acct.fuse_status = "HALTED"
+            elif acct.fuse_status == "HALTED":
+                if acct.current_drawdown > -risk_cfg["drawdown_warn_pct"] * 0.5:
+                    acct.fuse_status = "NORMAL"
             elif acct.current_drawdown <= -risk_cfg["drawdown_warn_pct"]:
                 acct.fuse_status = "WARNING"
             else:
                 acct.fuse_status = "NORMAL"
 
         state = self.gateway.paper.get_account_state(account_id)
+        _emit("正在刷新全市场实时大盘状态与宽度...", 0.75)
         self.record_daily_nav(account_id)
 
         # Also refresh full-market real-time Market Regime if stale (>90s) during live refresh
@@ -215,6 +234,7 @@ class PaperTradingService:
         except Exception as exc:  # noqa: BLE001
             logger.debug("Optional realtime regime refresh skipped during intraday_refresh: %s", exc)
 
+        _emit("正在广播最新账户净值与告警状态...", 0.94)
         ws_manager.broadcast_threadsafe("paper_nav", to_jsonable({**state["account"], "stop_alerts": stop_alerts}))
         if stop_alerts:
             ws_manager.broadcast_threadsafe("risk_alert", {"type": "STOP_LOSS_TRIGGERED", "alerts": stop_alerts})
@@ -233,43 +253,34 @@ class PaperTradingService:
         codes: list[str] | None = None,
         override_mode: BrokerMode | None = None,
         fetch_live_quotes: bool = True,
+        progress_cb: Callable[[str, float], None] | None = None,
     ) -> dict:
-        """14:40 rebalance workflow:
-        1. Score ALL stocks synced in DuckDB (`codes=None` -> full synced universe) to find Top-100 candidates.
-        2. Fetch real-time L1 quotes ONLY for held positions + Top-100 candidates (strictly <= 100 to prevent rate limits).
-        3. Re-generate final recommendations with live prices & pass EVERY order through RiskMiddleware -> BrokerAdapter."""
-        # Step 1: Full-universe cross-sectional scoring
-        pre_bundle = self.recommender.generate(
+        """14:40 rebalance workflow (single-pass factor/SHAP scoring -> Top-100 L1 quotes -> RiskMiddleware execution)."""
+        def _emit(stage: str, pct: float) -> None:
+            if progress_cb is not None:
+                progress_cb(stage, pct)
+
+        captured_quotes: list[pd.DataFrame] = []
+
+        def _fetch_quotes(watch_codes: list[str]) -> pd.DataFrame | None:
+            if not fetch_live_quotes or not watch_codes:
+                return None
+            df = self.sync_service.snapshot_top(watch_codes, max_n=100)
+            if df is not None and not df.empty:
+                captured_quotes.append(df)
+            return df
+
+        bundle = self.recommender.generate(
             account_id=account_id,
             codes=codes,
             live_quotes=None,
-            persist=not fetch_live_quotes,
-            broadcast=not fetch_live_quotes,
+            fetch_live_quotes_fn=_fetch_quotes if fetch_live_quotes else None,
+            persist=True,
+            broadcast=True,
+            progress_cb=lambda msg, p: _emit(msg, 0.72 * p),
         )
-
-        state_pre = self.gateway.paper.get_account_state(account_id)
-        held_codes = [p["ts_code"] for p in state_pre.get("positions", []) if p.get("total_shares", 0) > 0]
-
-        # Step 2: Targeted Top-100 + holdings live L1 quote snapshot
-        live_quotes = pd.DataFrame()
-        if fetch_live_quotes:
-            watch_top100 = list(dict.fromkeys([*held_codes, *pre_bundle.top_candidates_codes]))[:100]
-            if watch_top100:
-                try:
-                    live_quotes = self.sync_service.snapshot_top(watch_top100, max_n=100)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Rebalance live quote snapshot failed, falling back to latest DuckDB bars: %s", exc)
-
-        if fetch_live_quotes:
-            bundle = self.recommender.generate(
-                account_id=account_id,
-                codes=codes,
-                live_quotes=live_quotes,
-                persist=True,
-                broadcast=True,
-            )
-        else:
-            bundle = pre_bundle
+        live_quotes = captured_quotes[0] if captured_quotes else pd.DataFrame()
+        _emit("正在经前置风控中间件执行调仓指令 (先卖后买/大盘降仓减持)...", 0.78)
 
         quote_map = {str(r["ts_code"]): r.to_dict() for _, r in live_quotes.iterrows()} if not live_quotes.empty else {}
         state = self.gateway.paper.get_account_state(account_id)
@@ -427,6 +438,7 @@ class PaperTradingService:
             receipt = self.gateway.submit_order(req, override_mode=override_mode)
             receipts.append(receipt.to_dict())
 
+        _emit("正在落盘当日模拟盘净值并推送最新持仓...", 0.94)
         nav_point = self.record_daily_nav(account_id, regime=bundle.regime["regime"])
         final_state = self.gateway.paper.get_account_state(account_id)
         ws_manager.broadcast_threadsafe("paper_nav", to_jsonable(final_state["account"]))

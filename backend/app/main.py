@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers import backtest, broker, dashboard, factors, paper, signals
@@ -13,6 +13,7 @@ from app.api.ws_manager import ws_manager
 from app.config import get_settings
 from app.core.calendar import now_cn
 from app.core.logging import get_logger, setup_logging
+from app.core.task_manager import action_task_manager
 from app.db.duckdb_client import get_duckdb
 from app.db.sqlite_client import get_sqlite_db
 from app.paper.scheduler import StudioScheduler
@@ -79,6 +80,22 @@ def health() -> dict:
 @app.get("/api/v1/scheduler/jobs")
 def list_scheduler_jobs() -> list[dict]:
     return _scheduler.list_jobs() if _scheduler else []
+
+
+@app.get("/api/v1/tasks")
+def list_action_tasks(
+    active_only: bool = Query(default=False),
+    kind: str | None = Query(default=None),
+) -> list[dict]:
+    return action_task_manager.list_tasks(kind=kind, active_only=active_only)
+
+
+@app.get("/api/v1/tasks/{task_id}")
+def get_action_task(task_id: str) -> dict:
+    snap = action_task_manager.get(task_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+    return snap
 
 
 @app.websocket("/api/v1/ws/stream")

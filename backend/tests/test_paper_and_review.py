@@ -139,3 +139,59 @@ def test_real_data_recommender_model_rollback_and_weekly_review(tmp_path, real_d
         assert len(paper_svc.get_nav_history()) == 0
     finally:
         sqlite.close()
+
+
+def test_halted_drawdown_fuse_stays_sticky_on_intraday_refresh(tmp_path):
+    """Regression test for Bug #9: HALTED drawdown fuse must NOT silently reset to WARNING on bounce."""
+    from app.db.models import PaperAccount
+
+    sqlite = SQLiteDatabase(tmp_path / "fuse_sticky.db", initial_cash=300_000.0)
+    tmp_duck = DuckDBClient(tmp_path / "fuse_duck.duckdb")
+    try:
+        with sqlite.session_scope() as session:
+            acct = session.get(PaperAccount, "default_paper")
+            acct.peak_equity = 300_000.0
+            acct.cash = 270_000.0  # -10% drawdown (between -8% warn and -12% halt)
+            acct.total_equity = 270_000.0
+            acct.current_drawdown = -0.10
+            acct.fuse_status = "HALTED"  # Previously halted -> requires manual reset!
+
+        paper_svc = PaperTradingService(duckdb_client=tmp_duck, sqlite_db=sqlite)
+        res = paper_svc.intraday_refresh(candidate_codes=[])
+        assert res["account"]["fuse_status"] == "HALTED"
+    finally:
+        tmp_duck.close()
+        sqlite.close()
+
+
+def test_recommender_single_pass_live_quotes_and_progress(tmp_path, real_db, sample_codes):
+    """Regression test for Bug #2/#3/#4: single-pass fetch_live_quotes_fn + progress callback + signal date."""
+    sqlite = SQLiteDatabase(tmp_path / "rec_single_pass.db")
+    try:
+        reg = ModelRegistry(sqlite_db=sqlite, models_dir=tmp_path / "models")
+        reg.retrain_and_register(codes=sample_codes, model_type="regression", notes="sp", duckdb_client=real_db)
+        rec_engine = RecommendationEngine(duckdb_client=real_db, sqlite_db=sqlite, registry=reg)
+
+        quote_calls: list[list[str]] = []
+        progress_events: list[tuple[str, float]] = []
+
+        def _fake_fetch(watch_codes: list[str]):
+            quote_calls.append(list(watch_codes))
+            return None  # falls back cleanly to EOD bars without network
+
+        bundle = rec_engine.generate(
+            codes=sample_codes,
+            fetch_live_quotes_fn=_fake_fetch,
+            persist=True,
+            broadcast=False,
+            progress_cb=lambda msg, pct: progress_events.append((msg, pct)),
+        )
+        assert len(quote_calls) == 1  # single-pass guaranteed
+        assert len(progress_events) >= 4
+        assert progress_events[-1][1] >= 0.90
+        assert len(bundle.recommendations) > 0
+        # Signal trade_date matches regime trade_date (Bug #4)
+        assert bundle.trade_date == bundle.regime["trade_date"]
+        assert all(r["trade_date"] == bundle.trade_date for r in bundle.recommendations)
+    finally:
+        sqlite.close()

@@ -843,17 +843,19 @@ class DataSyncService:
         ts_codes: list[str],
         start: date,
         end: date,
-        workers: int = 4,
+        workers: int = 8,
         resume: bool = True,
         min_bars_for_skip: int = 120,
+        stale_days: int = 5,
+        check_start_floor: bool = True,
         enrich_baostock: bool = False,
-        batch_size: int = 20,
+        batch_size: int = 40,
         progress: ProgressFn | None = None,
         report: SyncReport | None = None,
     ) -> SyncReport:
         """Multi-threaded, checkpoint-resumable real daily bar sync (Plan A full-market engine).
 
-        Uses AKShare Tencent CDN (`raw` + `hfq` adj_factor) across `workers` threads,
+        Uses keep-alive pooled Tencent CDN (`raw` + `hfq` adj_factor) across `workers` threads,
         strictly attaches PIT `financial_pit` (trade_date > ann_date) for daily PE_TTM/PB/total_mv,
         and commits to DuckDB in batches so interrupted runs resume seamlessly.
         """
@@ -867,7 +869,11 @@ class DataSyncService:
 
         if resume:
             pending, skipped = self.get_resume_pending_codes(
-                norm_codes, end, min_bars=min_bars_for_skip, target_start=start
+                norm_codes,
+                end,
+                min_bars=min_bars_for_skip,
+                stale_days=stale_days,
+                target_start=start if check_start_floor else None,
             )
             report.stocks_synced += len(skipped)
             if skipped:
@@ -982,23 +988,25 @@ class DataSyncService:
                 encoding="utf-8",
             )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futs = [pool.submit(_fetch_and_prepare, c) for c in pending]
-            for fut in concurrent.futures.as_completed(futs):
-                code, bars, source, err = fut.result()
-                done += 1
-                if bars is not None and not bars.empty:
-                    buffer_frames.append(bars)
-                    report.stocks_synced += 1
-                    report.sources[source] = report.sources.get(source, 0) + 1
-                else:
-                    report.failed[code] = err or "unknown error"
-                    logger.warning("parallel sync %s failed: %s", code, err)
-                if len(buffer_frames) >= batch_size:
-                    _flush_buffer()
-                if progress:
-                    progress(f"daily_bars ({len(skipped) + done}/{len(norm_codes)}) {code}", (len(skipped) + done) / max(1, len(norm_codes)))
-
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                futs = [pool.submit(_fetch_and_prepare, c) for c in pending]
+                for fut in concurrent.futures.as_completed(futs):
+                    code, bars, source, err = fut.result()
+                    done += 1
+                    if bars is not None and not bars.empty:
+                        buffer_frames.append(bars)
+                        report.stocks_synced += 1
+                        report.sources[source] = report.sources.get(source, 0) + 1
+                    else:
+                        report.failed[code] = err or "unknown error"
+                        logger.warning("parallel sync %s failed: %s", code, err)
+                    if len(buffer_frames) >= batch_size:
+                        _flush_buffer()
+                    if progress:
+                        progress(f"daily_bars ({len(skipped) + done}/{len(norm_codes)}) {code}", (len(skipped) + done) / max(1, len(norm_codes)))
+        finally:
+            fast_primary.close()
         _flush_buffer()
         return report
 
@@ -1011,22 +1019,55 @@ class DataSyncService:
         return self.primary.get_realtime_spot(codes)
 
     # ------------------------------------------------------------------ high level
-    def incremental_sync(self, ts_codes: list[str] | None = None, lookback_days: int = 10, workers: int = 4) -> SyncReport:
-        """Incremental post-close sync from last stored date across ALL synced stocks in DuckDB."""
+    def incremental_sync(
+        self,
+        ts_codes: list[str] | None = None,
+        lookback_days: int = 10,
+        workers: int = 10,
+        progress: ProgressFn | None = None,
+    ) -> SyncReport:
+        """Incremental post-close sync from last COMPLETE stored date across ALL synced stocks in DuckDB.
+
+        Checkpoint-resumable (`resume=True, stale_days=0`): stocks already synced through `end` are
+        skipped immediately so retries or interrupted runs finish in seconds.
+        """
         from app.core.calendar import now_cn
+
+        def _emit(stage: str, pct: float) -> None:
+            if progress is not None:
+                progress(stage, pct)
 
         now = now_cn()
         # Before 15:15 CN market close, cap daily bar sync at yesterday to avoid partial intraday bars
         end = (now.date() - timedelta(days=1)) if (now.hour < 15 or (now.hour == 15 and now.minute < 15)) else now.date()
         if ts_codes is None:
             ts_codes = self.db.query_df("SELECT DISTINCT ts_code FROM daily_bars")["ts_code"].tolist()
-        last = self.db.query_scalar("SELECT MAX(trade_date) FROM daily_bars")
-        start = (pd.to_datetime(last).date() - timedelta(days=lookback_days)) if last is not None else end - timedelta(days=730)
-        self.sync_calendar(start - timedelta(days=30), end)
-        self.sync_index(start - timedelta(days=120), end)
-        report = self.sync_daily_bars_parallel(
-            ts_codes, start, end, workers=workers, resume=False, enrich_baostock=False
+        # Use latest COMPLETE trading date (>=30% stock coverage) so partial trailing rows never skip unsynced stocks
+        last = self.db.query_scalar(
+            """
+            WITH dc AS (SELECT trade_date, COUNT(DISTINCT ts_code) AS cnt FROM daily_bars GROUP BY 1),
+                 mx AS (SELECT MAX(cnt) AS peak FROM dc)
+            SELECT MAX(dc.trade_date) FROM dc, mx WHERE dc.cnt >= GREATEST(1, mx.peak * 0.30)
+            """
         )
+        start = (pd.to_datetime(last).date() - timedelta(days=lookback_days)) if last is not None else end - timedelta(days=730)
+        _emit(f"正在同步交易日历与基准指数 ({start} ~ {end})...", 0.06)
+        self.sync_calendar(start - timedelta(days=30), end + timedelta(days=30))
+        self.sync_index(start - timedelta(days=120), end)
+        _emit(f"正在并发增量同步 {len(ts_codes)} 只股票日线 ({start} ~ {end})...", 0.14)
+        report = self.sync_daily_bars_parallel(
+            ts_codes,
+            start,
+            end,
+            workers=max(1, min(workers, 12)),
+            resume=True,
+            min_bars_for_skip=1,
+            stale_days=0,
+            check_start_floor=False,
+            enrich_baostock=False,
+            progress=lambda msg, p: _emit(msg, 0.14 + 0.68 * p),
+        )
+        _emit("正在同步最新真实主力资金流...", 0.84)
         # Fast 1-call real bulk capital flow update for today (EM rank -> THS fallback)
         self.sync_capital_flow_today(ts_codes, report=report)
         return report

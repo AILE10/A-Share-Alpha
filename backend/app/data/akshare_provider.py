@@ -89,10 +89,126 @@ class AKShareProvider(DataProvider):
     name = "akshare"
 
     def __init__(self, request_interval: float = 0.25) -> None:
+        import threading
+
         self.request_interval = request_interval
         self._last_call = 0.0
         self._em_cooldown_until: float = 0.0
         self._em_his_cooldown_until: float = 0.0
+        self._tx_client = None
+        self._tx_lock = threading.Lock()
+
+    def _get_tx_client(self):
+        if self._tx_client is None:
+            with self._tx_lock:
+                if self._tx_client is None:
+                    import httpx
+
+                    self._tx_client = httpx.Client(
+                        timeout=12.0,
+                        limits=httpx.Limits(max_connections=24, max_keepalive_connections=20),
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+        return self._tx_client
+
+    def close(self) -> None:
+        if self._tx_client is not None:
+            try:
+                self._tx_client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._tx_client = None
+
+    def _fetch_tx_kline_fast(self, ts_code: str, start: date, end: date, adjust: str = "") -> pd.DataFrame:
+        """Direct keep-alive Tencent newfqkline fetcher (exact same endpoint & unit scaling as ak.stock_zh_a_hist_tx,
+        skipping redundant per-stock get_tx_start_year probes and tqdm overhead -> ~10x faster)."""
+        import json
+
+        symbol = ts_code_to_ak_prefix(ts_code)
+        vol_mult = 1.0 if symbol.startswith(("sh688", "sh689")) else 100.0
+        url = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+        client = self._get_tx_client()
+
+        # Chunk by <= 550 calendar days (~380 trading days < 640-bar cap)
+        windows: list[tuple[date, date]] = []
+        cur = start
+        while cur <= end:
+            nxt = date(min(end.year, cur.year + 1), 12, 31)
+            if nxt > end:
+                nxt = end
+            windows.append((cur, nxt))
+            cur = date(nxt.year + 1, 1, 1)
+
+        rows: list[list] = []
+        key_order = ("hfqday", "day", "qfqday") if adjust == "hfq" else ("day", "hfqday", "qfqday")
+        for w_start, w_end in windows:
+            params = {
+                "_var": f"kline_day{adjust}{w_start.year}",
+                "param": f"{symbol},day,{w_start.isoformat()},{w_end.isoformat()},640,{adjust}",
+            }
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            txt = resp.text
+            idx = txt.find("={")
+            if idx < 0:
+                continue
+            payload = json.loads(txt[idx + 1 :])
+            node = (payload.get("data") or {}).get(symbol)
+            if not isinstance(node, dict):
+                continue
+            day_rows = None
+            for k in key_order:
+                if k in node and node[k]:
+                    day_rows = node[k]
+                    break
+            if day_rows:
+                rows.extend(day_rows)
+
+        if not rows:
+            return empty_frame(DAILY_BAR_COLUMNS)
+
+        parsed = []
+        for r in rows:
+            if not isinstance(r, list) or len(r) < 6:
+                continue
+            d_str = str(r[0])[:10]
+            try:
+                d_val = date.fromisoformat(d_str)
+            except ValueError:
+                continue
+            if d_val < start or d_val > end:
+                continue
+            try:
+                op = float(r[1])
+                cl = float(r[2])
+                hi = float(r[3])
+                lo = float(r[4])
+                vol = float(r[5]) * vol_mult
+            except (TypeError, ValueError):
+                continue
+            turn_pct = np.nan
+            amt = np.nan
+            if len(r) > 7 and r[7] not in ("", None):
+                try:
+                    turn_pct = float(r[7])
+                except (TypeError, ValueError):
+                    pass
+            if len(r) > 8 and r[8] not in ("", None):
+                try:
+                    amt = float(r[8]) * 10000.0
+                except (TypeError, ValueError):
+                    pass
+            parsed.append((d_val, op, hi, lo, cl, vol, amt, turn_pct))
+
+        if not parsed:
+            return empty_frame(DAILY_BAR_COLUMNS)
+
+        df = pd.DataFrame(parsed, columns=["trade_date", "open", "high", "low", "close", "volume", "amount", "turnover_rate"])
+        df = df.drop_duplicates("trade_date", keep="last").sort_values("trade_date").reset_index(drop=True)
+        df["ts_code"] = normalize_ts_code(ts_code)
+        df["pre_close"] = df["close"].shift(1)
+        df["amplitude"] = (df["high"] - df["low"]) / df["pre_close"] * 100.0
+        return df[DAILY_BAR_COLUMNS]
 
     def _throttle(self) -> None:
         elapsed = time.monotonic() - self._last_call
@@ -392,7 +508,25 @@ class AKShareProvider(DataProvider):
         return empty_frame(CAPITAL_FLOW_COLUMNS), ""
 
     def get_daily_bars_with_hfq(self, ts_code: str, start: date, end: date) -> pd.DataFrame:
-        """Fetch UNADJUSTED bars + backward adj_factor (hfq_close / raw_close) from AKShare Tencent CDN."""
+        """Fetch UNADJUSTED bars + backward adj_factor (hfq_close / raw_close) from Tencent CDN (keep-alive pooled)."""
+        try:
+            raw = self._fetch_tx_kline_fast(ts_code, start, end, adjust="")
+            if not raw.empty:
+                try:
+                    hfq = self._fetch_tx_kline_fast(ts_code, start, end, adjust="hfq")
+                    if not hfq.empty:
+                        hfq_map = dict(zip(hfq["trade_date"], hfq["close"]))
+                        hfq_c = raw["trade_date"].map(hfq_map).astype(float)
+                        adj = (hfq_c / raw["close"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+                        raw["adj_factor"] = adj.ffill().bfill().fillna(1.0)
+                    else:
+                        raw["adj_factor"] = 1.0
+                except Exception:  # noqa: BLE001
+                    raw["adj_factor"] = 1.0
+                return raw
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Fast TX kline %s failed, falling back to ak.stock_zh_a_hist_tx: %s", ts_code, exc)
+
         raw = self._bars_tx(ts_code, start, end)
         if raw.empty:
             return raw

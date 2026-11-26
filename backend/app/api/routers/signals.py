@@ -10,12 +10,14 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.config import get_settings
 from app.core.constants import normalize_ts_code
+from app.core.task_manager import action_task_manager
 from app.data.sync_service import DataSyncService
 from app.db.duckdb_client import get_duckdb
 from app.db.models import PaperOrder, SignalRecommendation
 from app.db.sqlite_client import get_sqlite_db
 from app.factors.service import to_jsonable
 from app.paper.recommender import RecommendationEngine
+from app.strategy.realtime_regime import get_realtime_regime_service
 
 router = APIRouter(prefix="/signals", tags=["Signals & K-Line"])
 
@@ -43,39 +45,65 @@ def get_latest_signals() -> dict:
                 "trade_date": str(pd.to_datetime(reg_df.iloc[0]["trade_date"]).date()),
                 "regime": str(reg_df.iloc[0]["regime"]),
                 "target_exposure": float(reg_df.iloc[0]["target_exposure"]),
+                "style_mode": str(reg_df.iloc[0]["style_mode"]) if ("style_mode" in reg_df.columns and pd.notna(reg_df.iloc[0]["style_mode"])) else "ALL_CAP",
                 "breadth_above_ma20": float(reg_df.iloc[0]["breadth_above_ma20"]),
+                "is_realtime": False,
             }
             if not reg_df.empty
             else {}
         )
+        rt_snap = get_realtime_regime_service().get_cached(max_age_seconds=900.0)
+        if rt_snap and rt_snap.get("trade_date", "") >= regime.get("trade_date", ""):
+            regime = {**regime, **rt_snap}
         active = rec_eng.registry.get_active()
         model_vid = active["version_id"] if active else ""
     return to_jsonable({"regime": regime, "model_version_id": model_vid, "items": items})
 
 
-@router.post("/refresh")
-def refresh_signals(fetch_live_quotes: bool = True) -> dict:
+def _run_signals_refresh(fetch_live_quotes: bool = True, progress_cb=None) -> dict:
     db = get_duckdb()
     sqlite = get_sqlite_db()
     rec_eng = RecommendationEngine(db, sqlite)
-    # 1) Score ALL stocks in DuckDB to determine real Top-100 candidates
-    bundle = rec_eng.generate(codes=None, live_quotes=None, persist=not fetch_live_quotes, broadcast=not fetch_live_quotes)
-    if fetch_live_quotes and bundle.top_candidates_codes:
+
+    def _fetch_quotes(watch_codes: list[str]):
+        if not fetch_live_quotes or not watch_codes:
+            return None
         svc = DataSyncService(db)
         try:
-            # 2) Fetch intraday L1 quotes ONLY for Top-100 candidates to avoid rate limits
-            live_quotes = svc.snapshot_top(bundle.top_candidates_codes, max_n=100)
-        except Exception:  # noqa: BLE001
-            live_quotes = None
+            return svc.snapshot_top(watch_codes, max_n=100)
         finally:
             svc.close()
-        bundle = rec_eng.generate(codes=None, live_quotes=live_quotes, persist=True, broadcast=True)
-    return to_jsonable({
+
+    # Single-pass full-universe scoring -> targeted Top-100 live quotes -> final explainable cards
+    bundle = rec_eng.generate(
+        codes=None,
+        live_quotes=None,
+        fetch_live_quotes_fn=_fetch_quotes if fetch_live_quotes else None,
+        persist=True,
+        broadcast=True,
+        progress_cb=progress_cb,
+    )
+    return {
         "trade_date": bundle.trade_date,
         "regime": bundle.regime,
         "model_version_id": bundle.model_version_id,
         "items": bundle.recommendations,
-    })
+    }
+
+
+@router.post("/refresh")
+def refresh_signals(fetch_live_quotes: bool = True) -> dict:
+    return to_jsonable(_run_signals_refresh(fetch_live_quotes=fetch_live_quotes))
+
+
+@router.post("/refresh-async")
+def refresh_signals_async(fetch_live_quotes: bool = True) -> dict:
+    """Non-blocking single-pass signal refresh with real-time WebSocket & polling progress."""
+    return action_task_manager.submit(
+        kind="signals_refresh",
+        title="实时快照重算推荐清单",
+        fn=lambda emit: _run_signals_refresh(fetch_live_quotes=fetch_live_quotes, progress_cb=emit),
+    )
 
 
 @router.get("/kline/{ts_code}")
@@ -145,6 +173,7 @@ def get_stock_kline(ts_code: str, limit: int = Query(default=160, ge=30, le=500)
     # Collect active recommendation + real paper orders as chart markers & price lines
     markers = []
     rec_card = None
+    candle_dates = {cd["time"] for cd in candles}
     with sqlite.session_scope() as session:
         rec = (
             session.query(SignalRecommendation)
@@ -167,8 +196,12 @@ def get_stock_kline(ts_code: str, limit: int = Query(default=160, ge=30, le=500)
                 "tech_patterns": json.loads(rec.tech_patterns_json or "[]"),
                 "rationale": rec.rationale,
             }
+            # Align live intraday signal date to latest available K-line candle date for Lightweight Charts
+            rec_marker_time = rec.trade_date
+            if rec_marker_time not in candle_dates and candles:
+                rec_marker_time = candles[-1]["time"]
             markers.append({
-                "time": rec.trade_date,
+                "time": rec_marker_time,
                 "position": "belowBar" if rec.action == "BUY" else ("aboveBar" if rec.action == "SELL" else "belowBar"),
                 "color": "#F43F5E" if rec.action == "BUY" else ("#10B981" if rec.action == "SELL" else "#38BDF8"),
                 "shape": "arrowUp" if rec.action == "BUY" else ("arrowDown" if rec.action == "SELL" else "circle"),
@@ -182,9 +215,7 @@ def get_stock_kline(ts_code: str, limit: int = Query(default=160, ge=30, le=500)
             .all()
         )
         for o in orders:
-            t_str = o.created_at.strftime("%Y-%m-%d") if o.created_at else candles[-1]["time"]
-            # Align marker date to an existing candle date if needed
-            candle_dates = {cd["time"] for cd in candles}
+            t_str = o.created_at.strftime("%Y-%m-%d") if o.created_at else (candles[-1]["time"] if candles else "")
             if t_str not in candle_dates and candles:
                 t_str = candles[-1]["time"]
             markers.append({

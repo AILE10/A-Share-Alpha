@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from app.config import get_settings
 from app.core.constants import ALL_FACTOR_NAMES, FACTOR_META_MAP
+from app.core.task_manager import action_task_manager
 from app.db.duckdb_client import get_duckdb
 from app.factors.service import FactorEngine, to_jsonable
 
@@ -224,3 +225,45 @@ def recompute_factors(req: ComputeFactorsRequest) -> dict:
         "persisted": persisted,
         "factor_status": res.factors.status,
     })
+
+
+@router.post("/compute-async")
+def recompute_factors_async(req: ComputeFactorsRequest) -> dict:
+    """Non-blocking full-market 20-factor recomputation with real-time progress bar."""
+    def _run(emit) -> dict:
+        db = get_duckdb()
+        eng = FactorEngine(db)
+        emit("正在加载全市场行情面板与 PIT 财报公告数据...", 0.12)
+        from app.factors.panel import load_market_panel
+        from app.factors.universe import apply_universe_filter
+        from app.factors.definitions import compute_factors, forward_returns
+        from app.factors.pipeline import standardize_panel
+        from app.factors.analyzer import analyze_factors
+        from app.factors.service import FactorRunResult
+        from app.strategy.regime import compute_market_regime, persist_market_regime
+
+        panel = load_market_panel(_sample_codes_or_all(), req.start_date, req.end_date, db=db)
+        emit(f"正在过滤动态股票池并计算 {len(panel.codes)} 只真股四维 20 因子...", 0.32)
+        universe = apply_universe_filter(panel, None, eng.all_trade_dates())
+        factors = compute_factors(panel)
+        emit("正在执行 MAD 去极值与申万行业+对数市值 OLS 中性化...", 0.56)
+        std = standardize_panel(factors.raw, universe.eligible, panel.industry_of(), panel.total_mv)
+        emit(f"正在计算单因子 RankIC / ICIR 与 5 分层净值 (未来 {req.horizon} 日)...", 0.74)
+        fwd = forward_returns(panel, req.horizon)
+        analysis = analyze_factors(std, fwd, universe.eligible, horizon=req.horizon, status=factors.status)
+        res = FactorRunResult(panel=panel, universe=universe, factors=factors, std=std, analysis=analysis)
+        emit("正在落盘因子值、IC 序列与最新大盘状态至 DuckDB...", 0.88)
+        persisted = eng.persist(res)
+        persist_market_regime(compute_market_regime(panel), db)
+        return {
+            "ok": True,
+            "universe": res.universe.summary(),
+            "persisted": persisted,
+            "factor_status": res.factors.status,
+        }
+
+    return action_task_manager.submit(
+        kind="factors_compute",
+        title="全市场四维 20 因子重算与单因子检验",
+        fn=_run,
+    )

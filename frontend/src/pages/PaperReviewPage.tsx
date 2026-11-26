@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, InputNumber, Modal, Select, Spin, Table, Tabs, Tag, message } from 'antd';
+import { Alert, Button, InputNumber, Modal, Progress, Select, Spin, Table, Tabs, Tag, message } from 'antd';
 import {
   ClearOutlined,
   FileTextOutlined,
@@ -10,6 +10,8 @@ import {
 } from '@ant-design/icons';
 import { aShareColor, api, fmtNum, fmtPct } from '../services/api';
 import { ModelVersionItem, WeeklyReviewItem } from '../types/quant';
+import { useAsyncTask } from '../hooks/useAsyncTask';
+import { TaskProgressBanner } from '../components/common/TaskProgressBanner';
 
 export const PaperReviewPage: React.FC = () => {
   const [accountState, setAccountState] = useState<any>(null);
@@ -41,6 +43,25 @@ export const PaperReviewPage: React.FC = () => {
     }
   };
 
+  const paperTask = useAsyncTask({
+    kinds: ['paper_intraday', 'paper_rebalance', 'weekly_review', 'model_retrain'],
+    onDone: async (task) => {
+      await loadAll();
+      if (task.kind === 'paper_intraday') {
+        message.success('已完成 Top-100 盘中实时盯市与全市场大盘刷新');
+      } else if (task.kind === 'paper_rebalance') {
+        message.success('已执行 14:40 全市场选股调仓信号生成与模拟撮合');
+      } else if (task.kind === 'weekly_review') {
+        message.success('已生成最新周度复盘与 20 日因子衰减报告');
+      } else if (task.kind === 'model_retrain') {
+        message.success('新模型版本（6-Seed Bagging）训练完成并已激活');
+      }
+    },
+    onError: (task, errMsg) => {
+      message.error(`「${task.title}」执行失败: ${errMsg}`);
+    },
+  });
+
   useEffect(() => {
     loadAll();
   }, []);
@@ -55,6 +76,14 @@ export const PaperReviewPage: React.FC = () => {
       message.error(e?.response?.data?.detail || '操作执行失败');
     } finally {
       setBusy('');
+    }
+  };
+
+  const runAsyncAction = async (launcher: () => Promise<any>) => {
+    try {
+      await paperTask.startTask(launcher);
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '后台任务启动失败');
     }
   };
 
@@ -82,24 +111,27 @@ export const PaperReviewPage: React.FC = () => {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            icon={<SyncOutlined spin={busy === 'intra'} />}
-            loading={busy === 'intra'}
-            onClick={() => runAction('intra', () => api.triggerIntradayRefresh(), '已完成 Top-100 盘中实时盯市刷新')}
+            icon={<SyncOutlined spin={paperTask.runningKind === 'paper_intraday'} />}
+            loading={paperTask.runningKind === 'paper_intraday'}
+            disabled={paperTask.isRunning && paperTask.runningKind !== 'paper_intraday'}
+            onClick={() => runAsyncAction(() => api.triggerIntradayRefreshAsync())}
           >
             盘中盯市刷新
           </Button>
           <Button
             type="primary"
             icon={<ThunderboltOutlined />}
-            loading={busy === 'rebal'}
-            onClick={() => runAction('rebal', () => api.triggerPaperRebalance(true), '已执行 14:40 调仓信号生成与撮合')}
+            loading={paperTask.runningKind === 'paper_rebalance'}
+            disabled={paperTask.isRunning && paperTask.runningKind !== 'paper_rebalance'}
+            onClick={() => runAsyncAction(() => api.triggerPaperRebalanceAsync(true))}
           >
             立即触发 14:40 调仓
           </Button>
           <Button
             icon={<FileTextOutlined />}
-            loading={busy === 'rev'}
-            onClick={() => runAction('rev', () => api.generateWeeklyReview(), '已生成最新周度复盘与因子衰减报告')}
+            loading={paperTask.runningKind === 'weekly_review'}
+            disabled={paperTask.isRunning && paperTask.runningKind !== 'weekly_review'}
+            onClick={() => runAsyncAction(() => api.generateWeeklyReviewAsync())}
           >
             生成周度复盘
           </Button>
@@ -107,12 +139,23 @@ export const PaperReviewPage: React.FC = () => {
             danger
             icon={<ClearOutlined />}
             loading={busy === 'reset'}
+            disabled={paperTask.isRunning}
             onClick={() => setResetOpen(true)}
           >
             重置模拟盘
           </Button>
         </div>
       </div>
+
+      <TaskProgressBanner task={paperTask.activeTask} />
+      {busy && !paperTask.isRunning && (
+        <div className="quant-card px-3 py-2 border border-sky-500/30 bg-sky-950/20">
+          <div className="text-xs text-sky-300 mb-1">
+            {busy === 'reset' ? '正在清空并重置模拟盘账本...' : '正在切换并激活目标模型版本...'}
+          </div>
+          <Progress percent={75} size="small" status="active" showInfo={false} strokeColor="#38BDF8" trailColor="#1E293B" />
+        </div>
+      )}
 
       <Modal
         title="清空模拟盘并重置初始本金"
@@ -317,12 +360,11 @@ export const PaperReviewPage: React.FC = () => {
                         type="primary"
                         size="small"
                         icon={<RetweetOutlined />}
-                        loading={busy === 'retrain'}
+                        loading={paperTask.runningKind === 'model_retrain'}
+                        disabled={paperTask.isRunning && paperTask.runningKind !== 'model_retrain'}
                         onClick={() =>
-                          runAction(
-                            'retrain',
-                            () => api.retrainModel(retrainMode, `工作台一键重训 (${retrainMode})`),
-                            '新模型版本训练完成并已激活'
+                          runAsyncAction(() =>
+                            api.retrainModelAsync(retrainMode, `工作台一键滚动重训 (${retrainMode} · 6-Seed Bagging)`)
                           )
                         }
                       >

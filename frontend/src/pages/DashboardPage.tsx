@@ -1,18 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Popconfirm, Progress, Spin, Table, Tag, message } from 'antd';
-import { CloudDownloadOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
+import { CloudDownloadOutlined, DatabaseOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
 import { aShareColor, api, fmtNum, fmtPct } from '../services/api';
 import { useAlphaWebSocket } from '../services/ws';
+import { useAsyncTask } from '../hooks/useAsyncTask';
+import { TaskProgressBanner } from '../components/common/TaskProgressBanner';
 import { EChartsBox } from '../components/charts/EChartsBox';
 
 export const DashboardPage: React.FC = () => {
   const [data, setData] = useState<any>(null);
   const [dataStatus, setDataStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [syncTask, setSyncTask] = useState<{ stage: string; pct: number } | null>(null);
+  const [reloading, setReloading] = useState(false);
 
-  const load = async () => {
+  const load = async (showSpinner = false) => {
+    if (showSpinner) setReloading(true);
     try {
       const [sum, ds] = await Promise.all([api.getDashboardSummary(), api.getDataStatus()]);
       setData(sum);
@@ -21,8 +23,35 @@ export const DashboardPage: React.FC = () => {
       message.error(e?.response?.data?.detail || '仪表盘加载失败');
     } finally {
       setLoading(false);
+      if (showSpinner) setReloading(false);
     }
   };
+
+  const dashTask = useAsyncTask({
+    kinds: [
+      'data_sync_active_market',
+      'data_sync_incremental',
+      'data_sync_sample_60',
+      'data_sync_top100_snapshot',
+      'paper_intraday',
+      'regime_refresh',
+    ],
+    onDone: async (task) => {
+      await load(false);
+      if (task.kind === 'paper_intraday') {
+        message.success('已完成 Top-100 盘中实时盯市与全市场大盘刷新');
+      } else if (task.kind === 'data_sync_incremental') {
+        message.success('已完成最新收盘日线增量同步、因子与大盘状态更新！');
+      } else if (task.kind === 'data_sync_active_market') {
+        message.success('全市场活跃 A 股同步与因子重算完成！');
+      } else if (task.kind !== 'regime_refresh') {
+        message.success(`「${task.title}」执行完成`);
+      }
+    },
+    onError: (task, errMsg) => {
+      message.error(`「${task.title}」失败: ${errMsg}`);
+    },
+  });
 
   useAlphaWebSocket((evt) => {
     if (evt.channel === 'market_regime' && evt.payload?.regime) {
@@ -54,41 +83,32 @@ export const DashboardPage: React.FC = () => {
         };
       });
     }
-    if (evt.channel === 'task_progress' && evt.payload?.mode === 'active_market') {
-      if (evt.payload.stage === 'done') {
-        setSyncTask(null);
-        message.success('全市场活跃 A 股同步与因子重算完成！');
-        load();
-      } else if (evt.payload.stage === 'error') {
-        setSyncTask(null);
-        message.error(`全市场同步失败: ${evt.payload.error}`);
-      } else {
-        setSyncTask({ stage: evt.payload.stage, pct: Math.round((evt.payload.pct || 0) * 100) });
-      }
-    }
   });
 
   useEffect(() => {
-    load();
+    load(false);
   }, []);
 
   const handleIntradayRefresh = async () => {
-    setRefreshing(true);
     try {
-      await api.triggerIntradayRefresh();
-      await load();
-      message.success('已拉取 Top-100 真实行情快照并更新持仓盯市');
+      await dashTask.startTask(() => api.triggerIntradayRefreshAsync());
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '盘中刷新失败');
-    } finally {
-      setRefreshing(false);
+      message.error(e?.response?.data?.detail || '盘中刷新启动失败');
+    }
+  };
+
+  const handleIncrementalSync = async () => {
+    try {
+      await dashTask.startTask(() => api.triggerDataSync('incremental', { workers: 10 }));
+      message.info('已启动收盘日线与大盘状态增量同步，进度实时展示');
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '启动增量同步失败');
     }
   };
 
   const handleFullMarketSync = async () => {
     try {
-      await api.triggerDataSync('active_market', { workers: 4, days: 730 });
-      setSyncTask({ stage: '正在扫描全市场活跃股并断点续传同步...', pct: 2 });
+      await dashTask.startTask(() => api.triggerDataSync('active_market', { workers: 4, days: 730 }));
       message.info('已启动后台全市场活跃股断点续传同步（支持随时中断续传，进度实时推送）');
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '启动全市场同步失败');
@@ -264,11 +284,33 @@ export const DashboardPage: React.FC = () => {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-slate-100 m-0">策略总览与大盘状态仪表盘</h1>
-          <div className="text-xs text-slate-400 mt-0.5">
-            默认策略：20 因子增强 + Huber 10日 6-Seed Bagging + 强牛动量叠加 + 双指数二八分化择时 + 2.5元面值退市防线 · DuckDB 实盘库 {dataStatus?.stocks_synced ?? 0} 只真股 ({dataStatus?.date_range?.[0]} ~ {dataStatus?.date_range?.[1]})
+          <div className="text-xs text-slate-400 mt-0.5 flex flex-wrap items-center gap-2">
+            <span>
+              默认策略：20 因子增强 + Huber 10日 6-Seed Bagging + 强牛动量叠加 + 双指数二八分化择时 + 2.5元面值退市防线 · DuckDB 完整日线 {dataStatus?.stocks_synced ?? 0} 只真股 ({dataStatus?.date_range?.[0]} ~ {dataStatus?.date_range?.[1]})
+            </span>
+            {dataStatus?.partial_trailing_date && (
+              <Tag color="warning" className="m-0 text-[11px]">
+                {dataStatus.partial_trailing_date} 仅同步 {dataStatus.partial_trailing_stocks} 股（建议点击收盘增量同步）
+              </Tag>
+            )}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Popconfirm
+            title="启动收盘日线与大盘状态增量同步？"
+            description="将补齐最新完整交易日全市场日线、中证1000/沪深300指数、资金流并重算因子与大盘择时状态。"
+            onConfirm={handleIncrementalSync}
+            okText="开始增量同步"
+            cancelText="取消"
+          >
+            <Button
+              icon={<DatabaseOutlined />}
+              loading={dashTask.runningKind === 'data_sync_incremental'}
+              disabled={dashTask.isRunning}
+            >
+              收盘增量同步
+            </Button>
+          </Popconfirm>
           <Popconfirm
             title="启动免 Token 全市场活跃 A 股断点续传同步？"
             description="将扫描全部 4,600+ 只 A 股，自动保留成交额 ≥ 4000 万的活跃股并发拉取近 2 年日线与全市场 PIT 财报（已同步股票自动跳过）。"
@@ -276,24 +318,34 @@ export const DashboardPage: React.FC = () => {
             okText="开始全市场同步"
             cancelText="取消"
           >
-            <Button icon={<CloudDownloadOutlined />} disabled={Boolean(syncTask)}>
+            <Button
+              icon={<CloudDownloadOutlined />}
+              loading={dashTask.runningKind === 'data_sync_active_market'}
+              disabled={dashTask.isRunning}
+            >
               全市场活跃股同步
             </Button>
           </Popconfirm>
-          <Button icon={<SyncOutlined spin={refreshing} />} type="primary" onClick={handleIntradayRefresh} loading={refreshing}>
+          <Button
+            icon={<SyncOutlined spin={dashTask.runningKind === 'paper_intraday'} />}
+            type="primary"
+            onClick={handleIntradayRefresh}
+            loading={dashTask.runningKind === 'paper_intraday'}
+            disabled={dashTask.isRunning && dashTask.runningKind !== 'paper_intraday'}
+          >
             盘中快照盯市刷新
           </Button>
-          <Button icon={<ReloadOutlined />} onClick={load}>
+          <Button icon={<ReloadOutlined spin={reloading} />} loading={reloading} onClick={() => load(true)}>
             重新加载
           </Button>
         </div>
       </div>
 
-      {syncTask && (
-        <div className="quant-card p-3 flex items-center gap-4 border-sky-500/50">
-          <span className="text-xs text-sky-400 shrink-0 font-semibold">全市场同步中:</span>
-          <Progress percent={syncTask.pct} status="active" strokeColor="#38BDF8" trailColor="#1E293B" className="mb-0 flex-1" />
-          <span className="num text-xs text-slate-300 truncate max-w-xs">{syncTask.stage}</span>
+      <TaskProgressBanner task={dashTask.activeTask} />
+      {reloading && !dashTask.isRunning && (
+        <div className="quant-card px-3 py-2 border border-sky-500/30 bg-sky-950/20">
+          <div className="text-xs text-sky-300 mb-1">正在重新加载总览数据与行情状态...</div>
+          <Progress percent={70} size="small" status="active" showInfo={false} strokeColor="#38BDF8" trailColor="#1E293B" />
         </div>
       )}
 

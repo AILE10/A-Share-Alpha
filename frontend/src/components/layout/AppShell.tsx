@@ -14,6 +14,8 @@ import {
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useAlphaWebSocket } from '../../services/ws';
+import { useAsyncTask } from '../../hooks/useAsyncTask';
+import { TaskProgressBanner } from '../common/TaskProgressBanner';
 
 const { Header, Sider, Content } = Layout;
 
@@ -41,12 +43,28 @@ export const AppShell: React.FC<Props> = ({ children }) => {
   const [regime, setRegime] = useState<string>('NEUTRAL');
   const [targetExp, setTargetExp] = useState<number>(0.55);
   const [regimeDetail, setRegimeDetail] = useState<any>(null);
-  const [refreshingRegime, setRefreshingRegime] = useState(false);
   const [brokerMode, setBrokerMode] = useState<string>('PAPER');
   const [fuseStatus, setFuseStatus] = useState<string>('NORMAL');
   const [stagedOrder, setStagedOrder] = useState<any | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [form] = Form.useForm();
+
+  const regimeTask = useAsyncTask({
+    kinds: ['regime_refresh'],
+    onDone: (_task, snap) => {
+      if (snap?.regime) setRegime(snap.regime);
+      if (snap?.target_exposure !== undefined) setTargetExp(snap.target_exposure);
+      if (snap) setRegimeDetail(snap);
+      const dt = snap?.trade_date ? String(snap.trade_date).slice(5) : '';
+      const qt = snap?.quote_time ? ` ${String(snap.quote_time).slice(0, 5)}` : '';
+      const breadthTxt =
+        snap?.breadth_above_ma20 !== undefined ? ` · MA20宽度 ${(snap.breadth_above_ma20 * 100).toFixed(1)}%` : '';
+      message.success(`实时大盘已刷新 (${dt}${qt}) · 中证1000 ${snap?.csi1000_close ?? '-'}${breadthTxt}`);
+    },
+    onError: (_task, errMsg) => {
+      message.error(errMsg || '实时大盘状态刷新失败');
+    },
+  });
 
   const { connected } = useAlphaWebSocket((evt) => {
     if (evt.channel === 'market_regime' && evt.payload?.regime) {
@@ -83,20 +101,11 @@ export const AppShell: React.FC<Props> = ({ children }) => {
   }, [location.pathname]);
 
   const handleRefreshRegime = async () => {
-    if (refreshingRegime) return;
-    setRefreshingRegime(true);
+    if (regimeTask.isRunning) return;
     try {
-      const snap = await api.refreshRealtimeRegime();
-      if (snap?.regime) setRegime(snap.regime);
-      if (snap?.target_exposure !== undefined) setTargetExp(snap.target_exposure);
-      setRegimeDetail(snap);
-      message.success(
-        `实时大盘已刷新 (${snap.quote_time || snap.trade_date}) · 中证1000 ${snap.csi1000_close} · MA20宽度 ${(snap.breadth_above_ma20 * 100).toFixed(1)}%`
-      );
+      await regimeTask.startTask(() => api.refreshRealtimeRegimeAsync());
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '实时大盘状态刷新失败');
-    } finally {
-      setRefreshingRegime(false);
+      message.error(e?.response?.data?.detail || '实时大盘状态刷新启动失败');
     }
   };
 
@@ -215,7 +224,7 @@ export const AppShell: React.FC<Props> = ({ children }) => {
                 <Tag color={regInfo.color} className="m-0 font-semibold cursor-help">
                   {regInfo.label} ({Math.round(targetExp * 100)}%)
                   {regimeDetail?.is_realtime && regimeDetail?.quote_time
-                    ? ` · 实时 ${String(regimeDetail.quote_time).slice(0, 5)}`
+                    ? ` · ${regimeDetail?.trade_date ? String(regimeDetail.trade_date).slice(5) + ' ' : ''}实时 ${String(regimeDetail.quote_time).slice(0, 5)}`
                     : regimeDetail?.trade_date
                       ? ` · ${String(regimeDetail.trade_date).slice(5)}`
                       : ''}
@@ -225,11 +234,13 @@ export const AppShell: React.FC<Props> = ({ children }) => {
                 <Button
                   type="text"
                   size="small"
-                  icon={<SyncOutlined spin={refreshingRegime} className="text-sky-400" />}
+                  icon={<SyncOutlined spin={regimeTask.isRunning} className="text-sky-400" />}
                   onClick={handleRefreshRegime}
+                  disabled={regimeTask.isRunning}
                   className="px-1 h-6 flex items-center"
                 />
               </Tooltip>
+              <TaskProgressBanner task={regimeTask.activeTask} compact />
             </div>
             <div className="hidden md:flex items-center gap-2 text-xs">
               <span className="text-slate-400">执行模式:</span>

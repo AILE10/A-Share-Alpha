@@ -16,6 +16,7 @@ from app.broker.gateway import BrokerGateway
 from app.config import get_settings
 from app.core.calendar import today_cn
 from app.core.constants import BENCHMARK_CSI1000, BENCHMARK_CSI300
+from app.core.task_manager import action_task_manager
 from app.data.sync_service import DataSyncService
 from app.db.duckdb_client import get_duckdb
 from app.db.models import BacktestRun
@@ -229,6 +230,19 @@ def refresh_realtime_regime() -> dict:
         raise HTTPException(status_code=503, detail=f"实时大盘状态刷新失败: {exc}") from exc
 
 
+@router.post("/dashboard/regime/refresh-async")
+def refresh_realtime_regime_async() -> dict:
+    """Non-blocking real-time full-market Regime refresh with live WebSocket & polling progress."""
+    def _run(emit):
+        return get_realtime_regime_service().refresh(db=get_duckdb(), broadcast=True, progress_cb=emit)
+
+    return action_task_manager.submit(
+        kind="regime_refresh",
+        title="全市场实时大盘状态刷新",
+        fn=_run,
+    )
+
+
 @router.get("/data/status")
 def get_data_status() -> dict:
     db = get_duckdb()
@@ -236,6 +250,22 @@ def get_data_status() -> dict:
     stocks = int(db.query_scalar("SELECT COUNT(DISTINCT ts_code) FROM daily_bars") or 0)
     bar_rows = int(db.query_scalar("SELECT COUNT(*) FROM daily_bars") or 0)
     dr = db.query_df("SELECT MIN(trade_date) min_d, MAX(trade_date) max_d FROM daily_bars").iloc[0]
+    complete_max_d = db.query_scalar(
+        """
+        WITH dc AS (SELECT trade_date, COUNT(DISTINCT ts_code) AS cnt FROM daily_bars GROUP BY 1),
+             mx AS (SELECT MAX(cnt) AS peak FROM dc)
+        SELECT MAX(dc.trade_date) FROM dc, mx WHERE dc.cnt >= GREATEST(1, mx.peak * 0.30)
+        """
+    )
+    raw_max_d = dr["max_d"]
+    eff_max_d = complete_max_d if complete_max_d is not None else raw_max_d
+    partial_date = None
+    partial_stocks = 0
+    if pd.notna(raw_max_d) and complete_max_d is not None and pd.to_datetime(raw_max_d).date() > pd.to_datetime(complete_max_d).date():
+        partial_date = str(pd.to_datetime(raw_max_d).date())
+        partial_stocks = int(
+            db.query_scalar("SELECT COUNT(DISTINCT ts_code) FROM daily_bars WHERE trade_date = ?", [raw_max_d]) or 0
+        )
     fin_rows = int(db.query_scalar("SELECT COUNT(*) FROM financial_pit") or 0)
     fin_stocks = int(db.query_scalar("SELECT COUNT(DISTINCT ts_code) FROM financial_pit") or 0)
     cf_ok = int(db.query_scalar("SELECT COUNT(*) FROM capital_flow_daily WHERE status='OK'") or 0)
@@ -257,8 +287,10 @@ def get_data_status() -> dict:
         "daily_bar_rows": bar_rows,
         "date_range": [
             str(pd.to_datetime(dr["min_d"]).date()) if pd.notna(dr["min_d"]) else None,
-            str(pd.to_datetime(dr["max_d"]).date()) if pd.notna(dr["max_d"]) else None,
+            str(pd.to_datetime(eff_max_d).date()) if pd.notna(eff_max_d) else None,
         ],
+        "partial_trailing_date": partial_date,
+        "partial_trailing_stocks": partial_stocks,
         "financial_pit_rows": fin_rows,
         "financial_pit_stocks": fin_stocks,
         "capital_flow_ok_rows": cf_ok,
@@ -278,103 +310,113 @@ def get_data_status() -> dict:
 
 @router.post("/data/sync")
 def trigger_data_sync(req: SyncRequest) -> dict:
-    task_id = f"sync_{uuid.uuid4().hex[:10]}"
+    title_map = {
+        "active_market": "全市场活跃 A 股断点续传同步",
+        "incremental": "收盘日线与大盘状态增量同步",
+        "sample_60": "60 只样本股初始化同步",
+        "top100_snapshot": "Top-100 实时快照拉取",
+    }
+    kind = f"data_sync_{req.mode}"
 
-    def _worker() -> None:
+    def _run(emit) -> dict:
         svc = DataSyncService()
         try:
-            def _emit(stage: str, pct: float) -> None:
+            def _both(stage: str, pct: float) -> None:
+                emit(stage, pct)
                 ws_manager.broadcast_threadsafe(
                     "task_progress",
-                    {"task_id": task_id, "mode": req.mode, "stage": stage, "pct": round(float(pct), 4)},
+                    {"mode": req.mode, "stage": stage, "pct": round(float(pct), 4)},
                 )
 
-            _emit("starting", 0.02)
+            _both("正在初始化数据同步服务...", 0.02)
             if req.mode == "top100_snapshot":
                 codes = svc.db.query_df(
                     "SELECT ts_code FROM daily_bars GROUP BY ts_code ORDER BY MAX(amount) DESC LIMIT 100"
                 )["ts_code"].tolist()
+                _both(f"正在拉取 Top-{len(codes)} 实时 L1 行情快照...", 0.45)
                 df = svc.snapshot_top(codes, max_n=100)
-                ws_manager.broadcast_threadsafe(
-                    "task_progress",
-                    {"task_id": task_id, "mode": req.mode, "stage": "done", "pct": 1.0, "quoted": len(df)},
-                )
+                out = {"quoted": len(df)}
             elif req.mode == "active_market":
                 end = today_cn()
                 start = svc.resolve_aligned_start_date(end, req.days)
-                _emit(f"syncing calendar & full A-share listing ({start} ~ {end})", 0.05)
-                svc.sync_calendar(start - timedelta(days=365), end)
+                _both(f"正在同步交易日历与全市场股票列表 ({start} ~ {end})...", 0.05)
+                svc.sync_calendar(start - timedelta(days=365), end + timedelta(days=30))
                 if (svc.db.query_scalar("SELECT COUNT(*) FROM stock_basic") or 0) < 3000:
                     svc.sync_stock_basic(with_industry=True)
-                _emit("scanning full-market liquidity", 0.10)
+                _both("正在扫描全市场 4,600+ 只股票流动性与市值门槛...", 0.10)
                 codes, scan_stats = svc.select_active_market_universe(
                     min_amount=req.min_amount,
                     max_stocks=req.max_stocks,
                 )
-                _emit(f"syncing bulk PIT financials ({len(codes)} active stocks)", 0.15)
+                _both(f"正在核验全市场 PIT 财报公告库 ({len(codes)} 只活跃股)...", 0.15)
                 if (svc.db.query_scalar("SELECT COUNT(DISTINCT ts_code) FROM financial_pit") or 0) < max(500, int(len(codes) * 0.7)):
                     svc.sync_financials(None, start.year - 1, end.year)
-                _emit(f"resumable parallel bars sync ({len(codes)} stocks)", 0.25)
+                _both(f"正在断点续传并发拉取日线 ({len(codes)} 只股票)...", 0.25)
                 rep = svc.sync_daily_bars_parallel(
                     codes,
                     start,
                     end,
                     workers=max(1, min(req.workers, 6)),
                     resume=True,
-                    progress=lambda msg, p: _emit(msg, 0.25 + 0.60 * p),
+                    progress=lambda msg, p: _both(msg, 0.25 + 0.58 * p),
                 )
                 svc.sync_index(start - timedelta(days=120), end)
-                _emit("syncing real capital flow (EM push2his + bulk snapshot)", 0.86)
+                _both("正在同步真实主力资金流 (东财/同花顺)...", 0.85)
                 svc.sync_capital_flow(codes, rep, workers=min(6, max(2, req.workers)), resume=True, include_today_bulk=True)
-                _emit("recomputing 20 factors & market regime", 0.92)
+                _both("正在重算四维 20 因子与最新大盘择时状态...", 0.92)
                 eng = FactorEngine(svc.db)
                 f_run = eng.build(codes=None)
                 eng.persist(f_run)
                 persist_market_regime(compute_market_regime(f_run.panel), svc.db)
                 get_realtime_regime_service().clear_cache()
-                ws_manager.broadcast_threadsafe(
-                    "task_progress",
-                    {
-                        "task_id": task_id,
-                        "mode": req.mode,
-                        "stage": "done",
-                        "pct": 1.0,
-                        "scan_stats": scan_stats,
-                        "report": rep.to_dict(),
-                    },
-                )
+                out = {"scan_stats": scan_stats, "report": rep.to_dict()}
             elif req.mode == "sample_60":
                 end = today_cn()
                 start = end - timedelta(days=req.days)
-                svc.sync_calendar(start - timedelta(days=365), end)
+                _both("正在同步样本股日历、基础信息与 PIT 财报...", 0.15)
+                svc.sync_calendar(start - timedelta(days=365), end + timedelta(days=30))
                 svc.sync_stock_basic(with_industry=True)
                 codes = svc.select_sample_universe(n=req.n_stocks)
                 svc.sync_financials(codes, start.year - 1, end.year)
-                rep = svc.sync_daily_bars_parallel(codes, start, end, workers=req.workers, resume=True)
+                rep = svc.sync_daily_bars_parallel(
+                    codes, start, end, workers=req.workers, resume=True, progress=lambda msg, p: _both(msg, 0.30 + 0.55 * p)
+                )
                 svc.sync_index(start - timedelta(days=120), end)
                 svc.sync_capital_flow(codes, rep)
-                ws_manager.broadcast_threadsafe(
-                    "task_progress",
-                    {"task_id": task_id, "mode": req.mode, "stage": "done", "pct": 1.0, "report": rep.to_dict()},
-                )
+                out = {"report": rep.to_dict()}
             else:
-                rep = svc.incremental_sync(workers=req.workers)
-                _emit("recomputing market regime & latest factors", 0.90)
+                rep = svc.incremental_sync(
+                    workers=max(1, min(req.workers, 12)),
+                    progress=lambda msg, p: _both(msg, 0.04 + 0.80 * p),
+                )
+                _both("正在重算最新收盘大盘择时状态与四维因子...", 0.88)
                 eng = FactorEngine(svc.db)
                 f_run = eng.build(codes=None, compute_analysis=True)
                 eng.persist(f_run)
                 persist_market_regime(compute_market_regime(f_run.panel), svc.db)
                 get_realtime_regime_service().clear_cache()
-                ws_manager.broadcast_threadsafe(
-                    "task_progress",
-                    {"task_id": task_id, "mode": req.mode, "stage": "done", "pct": 1.0, "report": rep.to_dict()},
-                )
+                try:
+                    get_realtime_regime_service().refresh(db=svc.db, broadcast=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                out = {"report": rep.to_dict()}
+
+            ws_manager.broadcast_threadsafe(
+                "task_progress",
+                {"mode": req.mode, "stage": "done", "pct": 1.0, **out},
+            )
+            return out
         except Exception as exc:  # noqa: BLE001
             ws_manager.broadcast_threadsafe(
-                "task_progress", {"task_id": task_id, "mode": req.mode, "stage": "error", "error": str(exc)}
+                "task_progress", {"mode": req.mode, "stage": "error", "error": str(exc)}
             )
+            raise
         finally:
             svc.close()
 
-    threading.Thread(target=_worker, daemon=True).start()
-    return {"task_id": task_id, "mode": req.mode, "status": "RUNNING"}
+    snap = action_task_manager.submit(
+        kind=kind,
+        title=title_map.get(req.mode, f"数据同步 ({req.mode})"),
+        fn=_run,
+    )
+    return {**snap, "mode": req.mode}

@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Button, Spin, Tag, message } from 'antd';
+import { Button, Progress, Spin, Tag, message } from 'antd';
 import { SyncOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { api, fmtNum } from '../services/api';
 import { SignalRecommendationItem } from '../types/quant';
 import { KLineChart } from '../components/charts/KLineChart';
+import { useAlphaWebSocket } from '../services/ws';
+import { useAsyncTask } from '../hooks/useAsyncTask';
+import { TaskProgressBanner } from '../components/common/TaskProgressBanner';
 
 const ACTION_TAG: Record<string, { color: string; text: string }> = {
   BUY: { color: 'error', text: '建议买入' },
@@ -18,7 +21,6 @@ export const SignalInspectorPage: React.FC = () => {
   const [kline, setKline] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [klineLoading, setKlineLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   const [ordering, setOrdering] = useState(false);
 
   const loadSignals = async () => {
@@ -37,6 +39,31 @@ export const SignalInspectorPage: React.FC = () => {
     }
   };
 
+  const signalTask = useAsyncTask({
+    kinds: ['signals_refresh'],
+    onDone: async (_task, res) => {
+      if (res && Array.isArray(res.items)) {
+        const items: SignalRecommendationItem[] = res.items;
+        setSignals(items);
+        setMeta({ regime: res.regime, model_version_id: res.model_version_id });
+        if (items.length) setSelectedCode(items[0].ts_code);
+        message.success(`已刷新实时打分，共 ${items.length} 条可解释推荐信号（已广播至 WebSocket）`);
+      } else {
+        await loadSignals();
+        message.success('已完成实时快照推荐清单重算');
+      }
+    },
+    onError: (_task, errMsg) => {
+      message.error(`刷新信号失败: ${errMsg}`);
+    },
+  });
+
+  useAlphaWebSocket((evt) => {
+    if (evt.channel === 'market_regime' && evt.payload?.regime) {
+      setMeta((prev) => ({ ...prev, regime: { ...(prev.regime || {}), ...evt.payload } }));
+    }
+  });
+
   useEffect(() => {
     loadSignals();
   }, []);
@@ -52,18 +79,10 @@ export const SignalInspectorPage: React.FC = () => {
   }, [selectedCode]);
 
   const handleRefresh = async () => {
-    setRefreshing(true);
     try {
-      const res = await api.refreshSignals(true);
-      const items: SignalRecommendationItem[] = res.items || [];
-      setSignals(items);
-      setMeta({ regime: res.regime, model_version_id: res.model_version_id });
-      if (items.length) setSelectedCode(items[0].ts_code);
-      message.success(`已刷新实时打分，共 ${items.length} 条可解释推荐信号（已广播至 WebSocket）`);
+      await signalTask.startTask(() => api.refreshSignalsAsync(true));
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '刷新信号失败');
-    } finally {
-      setRefreshing(false);
+      message.error(e?.response?.data?.detail || '启动推荐清单刷新失败');
     }
   };
 
@@ -73,7 +92,23 @@ export const SignalInspectorPage: React.FC = () => {
     if (!selectedSignal || selectedSignal.action === 'HOLD') return;
     setOrdering(true);
     try {
-      const qty = Math.max(100, Math.floor((80_000 / Math.max(selectedSignal.ref_price, 1)) / 100) * 100);
+      const accState = await api.getPaperAccount();
+      let qty = 100;
+      if (selectedSignal.action === 'BUY') {
+        const equity = Number(accState?.account?.total_equity || 300_000);
+        // Respect single-stock 12% RiskMiddleware cap (use suggested_weight capped safely at 11.5%)
+        const targetWeight = Math.min(0.115, Math.max(0.02, Number(selectedSignal.suggested_weight || 0.08)));
+        const targetAmt = equity * targetWeight;
+        qty = Math.max(100, Math.floor(targetAmt / Math.max(selectedSignal.ref_price, 0.01) / 100) * 100);
+      } else {
+        const pos = (accState?.positions || []).find((p: any) => p.ts_code === selectedSignal.ts_code);
+        const sellable = Number(pos?.sellable_shares || 0);
+        if (sellable < 100) {
+          message.warning(`当前账户暂无 ${selectedSignal.ts_code} 可卖股数（或受 T+1 限制无法当日卖出）`);
+          return;
+        }
+        qty = Math.floor(sellable / 100) * 100;
+      }
       const receipt = await api.submitManualOrder({
         ts_code: selectedSignal.ts_code,
         side: selectedSignal.action,
@@ -84,7 +119,7 @@ export const SignalInspectorPage: React.FC = () => {
       if (receipt.status === 'REJECTED_RISK' || receipt.status === 'REJECTED_LIMIT') {
         message.warning(`下单被拦截: ${receipt.reject_reason}`);
       } else {
-        message.success(`委托提交成功 [${receipt.broker_mode}] 状态: ${receipt.status} (${receipt.order_id})`);
+        message.success(`委托提交成功 [${receipt.broker_mode}] ${qty} 股 · 状态: ${receipt.status} (${receipt.order_id})`);
       }
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '下单失败');
@@ -107,13 +142,22 @@ export const SignalInspectorPage: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-slate-100 m-0">实时选股推荐与 K 线透视</h1>
           <div className="text-xs text-slate-400 mt-0.5">
-            激活模型: <span className="num text-sky-400">{meta.model_version_id || '-'}</span> · 每条推荐附带综合排名、Top 3 TreeSHAP 因子分值、技术共振形态与参考止损/止盈位
+            大盘信号日: <span className="num text-slate-200">{meta.regime?.trade_date || '-'}</span>
+            {meta.regime?.regime ? ` (${meta.regime.regime} · 目标仓位 ${Math.round((meta.regime.target_exposure || 0) * 100)}%)` : ''} · 激活模型:{' '}
+            <span className="num text-sky-400">{meta.model_version_id || '-'}</span> · 每条推荐附带综合排名、Top 3 TreeSHAP 因子分值、技术共振形态与参考止损/止盈位
           </div>
         </div>
-        <Button type="primary" icon={<SyncOutlined spin={refreshing} />} loading={refreshing} onClick={handleRefresh}>
+        <Button
+          type="primary"
+          icon={<SyncOutlined spin={signalTask.isRunning} />}
+          loading={signalTask.isRunning}
+          onClick={handleRefresh}
+        >
           实时快照重算推荐清单
         </Button>
       </div>
+
+      <TaskProgressBanner task={signalTask.activeTask} />
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
         {/* Left: Recommendation List */}
@@ -272,16 +316,21 @@ export const SignalInspectorPage: React.FC = () => {
               </div>
 
               {selectedSignal.action !== 'HOLD' && (
-                <Button
-                  type="primary"
-                  danger={selectedSignal.action === 'BUY'}
-                  block
-                  icon={<ThunderboltOutlined />}
-                  loading={ordering}
-                  onClick={handleQuickOrder}
-                >
-                  经前置风控提交 {selectedSignal.action} 委托
-                </Button>
+                <div className="space-y-1.5">
+                  <Button
+                    type="primary"
+                    danger={selectedSignal.action === 'BUY'}
+                    block
+                    icon={<ThunderboltOutlined />}
+                    loading={ordering}
+                    onClick={handleQuickOrder}
+                  >
+                    经前置风控提交 {selectedSignal.action} 委托
+                  </Button>
+                  {ordering && (
+                    <Progress percent={70} size="small" status="active" showInfo={false} strokeColor="#38BDF8" trailColor="#1E293B" />
+                  )}
+                </div>
               )}
             </>
           ) : (

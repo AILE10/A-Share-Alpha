@@ -1,9 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Spin, Table, Tag, message } from 'antd';
 import { CalculatorOutlined } from '@ant-design/icons';
 import { aShareColor, api, fmtPct } from '../services/api';
 import { FactorSummaryItem } from '../types/quant';
 import { EChartsBox } from '../components/charts/EChartsBox';
+import { useAsyncTask } from '../hooks/useAsyncTask';
+import { TaskProgressBanner } from '../components/common/TaskProgressBanner';
 
 const DECAY_TAG: Record<string, { color: string; text: string }> = {
   STABLE: { color: 'cyan', text: '稳定有效' },
@@ -15,10 +17,11 @@ const DECAY_TAG: Record<string, { color: string; text: string }> = {
 export const FactorLabPage: React.FC = () => {
   const [factors, setFactors] = useState<FactorSummaryItem[]>([]);
   const [selected, setSelected] = useState<string>('ret_20d');
+  const selectedRef = useRef<string>('ret_20d');
+  selectedRef.current = selected;
   const [detail, setDetail] = useState<any>(null);
   const [corr, setCorr] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [computing, setComputing] = useState(false);
 
   const loadAll = async () => {
     setLoading(true);
@@ -27,7 +30,7 @@ export const FactorLabPage: React.FC = () => {
       const list: FactorSummaryItem[] = sum.factors || [];
       setFactors(list);
       setCorr(c);
-      if (list.length && !list.some((x) => x.factor_name === selected)) {
+      if (list.length && !list.some((x) => x.factor_name === selectedRef.current)) {
         setSelected(list[0].factor_name);
       }
     } catch (e: any) {
@@ -36,6 +39,25 @@ export const FactorLabPage: React.FC = () => {
       setLoading(false);
     }
   };
+
+  const factorTask = useAsyncTask({
+    kinds: ['factors_compute'],
+    onDone: async () => {
+      await loadAll();
+      if (selectedRef.current) {
+        try {
+          const d = await api.getFactorDetail(selectedRef.current, 5);
+          setDetail(d);
+        } catch {
+          // ignore
+        }
+      }
+      message.success('已完成四维 20 因子重算、单因子检验与大盘状态刷新');
+    },
+    onError: (_task, errMsg) => {
+      message.error(`因子重算失败: ${errMsg}`);
+    },
+  });
 
   useEffect(() => {
     loadAll();
@@ -50,17 +72,10 @@ export const FactorLabPage: React.FC = () => {
   }, [selected]);
 
   const handleRecompute = async () => {
-    setComputing(true);
     try {
-      await api.recomputeFactors(5);
-      await loadAll();
-      const d = await api.getFactorDetail(selected, 5);
-      setDetail(d);
-      message.success('已完成四维 17 因子重算与单因子检验');
+      await factorTask.startTask(() => api.recomputeFactorsAsync(5));
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '重算失败');
-    } finally {
-      setComputing(false);
+      message.error(e?.response?.data?.detail || '启动因子重算失败');
     }
   };
 
@@ -251,10 +266,12 @@ export const FactorLabPage: React.FC = () => {
             中位数填充 → MAD去极值 → 申万行业+对数市值OLS中性化 → 横截面Z-Score · 点击任意因子行切换右侧 5 分层净值与 IC 时序
           </div>
         </div>
-        <Button type="primary" icon={<CalculatorOutlined />} loading={computing} onClick={handleRecompute}>
+        <Button type="primary" icon={<CalculatorOutlined />} loading={factorTask.isRunning} onClick={handleRecompute}>
           重算全量四维因子
         </Button>
       </div>
+
+      <TaskProgressBanner task={factorTask.activeTask} />
 
       {degradedList.length > 0 && (
         <Alert

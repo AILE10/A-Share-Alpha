@@ -17,13 +17,14 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Callable
 
 import httpx
 import numpy as np
 import pandas as pd
 
 from app.api.ws_manager import ws_manager
-from app.core.calendar import now_cn, today_cn
+from app.core.calendar import is_trading_session, now_cn, today_cn
 from app.core.constants import (
     BENCHMARK_CSI1000,
     BENCHMARK_CSI300,
@@ -136,7 +137,10 @@ class RealtimeRegimeService:
         with self._lock:
             if self._latest_snapshot is None:
                 return None
-            if max_age_seconds is not None and (time.monotonic() - self._latest_mono) > max_age_seconds:
+            # Outside active trading hours, keep the latest closing snapshot cached instead of
+            # expiring and regressing the UI back to an older DuckDB date.
+            eff_max_age = max_age_seconds if is_trading_session() else None
+            if eff_max_age is not None and (time.monotonic() - self._latest_mono) > eff_max_age:
                 return None
             return dict(self._latest_snapshot)
 
@@ -275,13 +279,19 @@ class RealtimeRegimeService:
         provider: AKShareProvider | None = None,
         broadcast: bool = True,
         max_workers: int = 8,
+        progress_cb: Callable[[str, float], None] | None = None,
     ) -> dict:
         """Compute exact full-market real-time Market Regime using live Tencent L1 quotes (~2-3s)."""
+        def _emit(stage: str, pct: float) -> None:
+            if progress_cb is not None:
+                progress_cb(stage, pct)
+
         with self._refresh_lock:
             t0 = time.monotonic()
             client_db = db or get_duckdb()
             prov = provider or AKShareProvider()
 
+            _emit("正在拉取中证1000 / 沪深300 / 上证指数实时行情...", 0.12)
             idx_quotes = fetch_realtime_index_quotes()
             csi_q = idx_quotes.get(BENCHMARK_CSI1000)
             if not csi_q:
@@ -291,11 +301,18 @@ class RealtimeRegimeService:
             q_time_str = csi_q.get("quote_time") or now_cn().strftime("%H:%M:%S")
             live_date = date.fromisoformat(q_date_str)
 
-            # Determine if live_date is strictly newer than latest EOD bar or an active trading day
-            latest_db_date_raw = client_db.query_scalar("SELECT MAX(trade_date) FROM daily_bars")
+            # Compare against the latest COMPLETE EOD date (>=30% stock coverage) so partial trailing rows never mislead
+            latest_db_date_raw = client_db.query_scalar(
+                """
+                WITH dc AS (SELECT trade_date, COUNT(DISTINCT ts_code) AS cnt FROM daily_bars GROUP BY 1),
+                     mx AS (SELECT MAX(cnt) AS peak FROM dc)
+                SELECT MAX(dc.trade_date) FROM dc, mx WHERE dc.cnt >= GREATEST(1, mx.peak * 0.30)
+                """
+            )
             latest_db_date = pd.to_datetime(latest_db_date_raw).date() if latest_db_date_raw is not None else date(2020, 1, 1)
             is_new_day = live_date > latest_db_date
 
+            _emit("正在加载全市场 19/59 日历史基准缓存...", 0.28)
             base = self._ensure_baseline(client_db, live_date)
             csi_now = float(csi_q["close"])
             ma20_now = (base.idx_sum_19 + csi_now) / (base.idx_cnt_19 + 1) if (base.idx_cnt_19 + 1) >= 15 else np.nan
@@ -307,9 +324,12 @@ class RealtimeRegimeService:
             )
 
             # Pull exact full-market real-time L1 quotes across all synced active stocks
+            _emit(f"正在并发拉取全市场 {len(base.codes)} 只真股实时行情快照...", 0.48)
             spot_df = prov._spot_tx_batch(base.codes, max_workers=max_workers)
             if spot_df.empty:
                 raise RuntimeError("Empty full-market realtime spot response")
+
+            _emit("正在计算全市场 MA20 宽度与双指数二八分化状态...", 0.82)
 
             above_cnt = 0
             valid_cnt = 0
