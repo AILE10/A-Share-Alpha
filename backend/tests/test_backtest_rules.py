@@ -529,7 +529,10 @@ class TestRealDataBacktestIntegration:
         base_z = (base_scores - base_scores.mean()) / base_scores.std()
         assert np.corrcoef((tilted - base_z).to_numpy(), mom_comb.to_numpy())[0, 1] > 0.99
 
-        # 3) BacktestConfig defaults expose verified 0.10 / 0.08 weights in metrics
+        # 3) BacktestConfig defaults expose verified Champion 1b parameters
         cfg = BacktestConfig()
-        assert cfg.bull_mom_h120_weight == pytest.approx(0.10)
-        assert cfg.bull_mom_ret20_weight == pytest.approx(0.08)
+        assert cfg.bull_mom_h120_weight == pytest.approx(0.25)
+        assert cfg.bull_mom_ret20_weight == pytest.approx(0.0)
+        assert cfg.drawdown_warn_pct == pytest.approx(0.11)
+        assert cfg.drawdown_halt_pct == pytest.approx(0.12)
+        assert cfg.warn_exposure_mult == pytest.approx(0.70)

@@ -32,9 +32,12 @@ from app.core.constants import (
     BENCHMARK_CSI300,
     DEFAULT_BULL_MOM_H120_WEIGHT,
     DEFAULT_BULL_MOM_RET20_WEIGHT,
+    DEFAULT_DRAWDOWN_HALT_PCT,
+    DEFAULT_DRAWDOWN_WARN_PCT,
     DEFAULT_MIN_PRICE,
     DEFAULT_REBALANCE_DAYS,
     DEFAULT_SLIPPAGE_BPS,
+    DEFAULT_WARN_EXPOSURE_MULT,
     LOT_SIZE,
 )
 from app.factors.panel import MarketPanel
@@ -73,9 +76,9 @@ class BacktestConfig:
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS
     hard_stop_pct: float = 0.08
     atr_stop_mult: float = 2.5
-    drawdown_warn_pct: float = 0.08
-    drawdown_halt_pct: float = 0.12
-    warn_exposure_mult: float = 0.50
+    drawdown_warn_pct: float = DEFAULT_DRAWDOWN_WARN_PCT
+    drawdown_halt_pct: float = DEFAULT_DRAWDOWN_HALT_PCT
+    warn_exposure_mult: float = DEFAULT_WARN_EXPOSURE_MULT
     rolling_peak_days: int = 90
     warn_stable_days: int = 0
     halt_cooldown_days: int = 20
@@ -623,6 +626,8 @@ class AShareBacktestEngine:
         metrics["total_cash_interest"] = round(float(total_cash_interest), 2)
         metrics["bull_mom_h120_weight"] = float(cfg.bull_mom_h120_weight)
         metrics["bull_mom_ret20_weight"] = float(cfg.bull_mom_ret20_weight)
+        metrics["drawdown_warn_pct"] = float(cfg.drawdown_warn_pct)
+        metrics["warn_exposure_mult"] = float(cfg.warn_exposure_mult)
 
         # Normalize curves to 1.0000 for charting
         norm_strat = nav_series / nav_series.iloc[0]

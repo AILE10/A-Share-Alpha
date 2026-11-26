@@ -292,10 +292,10 @@ export const BrokerRiskPage: React.FC = () => {
               <Form.Item name="stock_atr_mult" label="ATR 移动止损倍数 (默认 2.5)">
                 <InputNumber min={0.5} max={6.0} step={0.5} className="w-full" />
               </Form.Item>
-              <Form.Item name="drawdown_warn_pct" label="组合回撤预警线 (减半仓)">
+              <Form.Item name="drawdown_warn_pct" label="组合回撤预警线 (默认 0.11 · 降仓至70%)">
                 <InputNumber min={0.02} max={0.3} step={0.01} className="w-full" />
               </Form.Item>
-              <Form.Item name="drawdown_halt_pct" label="组合回撤熔断线 (禁买)">
+              <Form.Item name="drawdown_halt_pct" label="组合回撤熔断线 (默认 0.12 · 禁买)">
                 <InputNumber min={0.05} max={0.4} step={0.01} className="w-full" />
               </Form.Item>
               <Form.Item name="max_orders_per_min" label="每分钟报撤单频率上限">

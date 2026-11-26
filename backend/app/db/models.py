@@ -185,7 +185,7 @@ class RiskConfig(Base):
     max_industry_weight: Mapped[float] = mapped_column(Float, default=0.25)
     stock_hard_stop_pct: Mapped[float] = mapped_column(Float, default=0.08)
     stock_atr_mult: Mapped[float] = mapped_column(Float, default=2.5)
-    drawdown_warn_pct: Mapped[float] = mapped_column(Float, default=0.08)
+    drawdown_warn_pct: Mapped[float] = mapped_column(Float, default=0.11)
     drawdown_halt_pct: Mapped[float] = mapped_column(Float, default=0.12)
     max_orders_per_min: Mapped[int] = mapped_column(Integer, default=30)
     max_orders_per_day: Mapped[int] = mapped_column(Integer, default=200)

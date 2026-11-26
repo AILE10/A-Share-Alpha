@@ -18,6 +18,12 @@ from pydantic import BaseModel, Field
 
 from app.api.ws_manager import ws_manager
 from app.backtest.engine import BacktestConfig
+from app.core.constants import (
+    DEFAULT_BULL_MOM_H120_WEIGHT,
+    DEFAULT_BULL_MOM_RET20_WEIGHT,
+    DEFAULT_DRAWDOWN_WARN_PCT,
+    DEFAULT_WARN_EXPOSURE_MULT,
+)
 from app.db.duckdb_client import get_duckdb
 from app.db.models import BacktestRun
 from app.db.sqlite_client import get_sqlite_db
@@ -61,8 +67,10 @@ class BacktestRunRequest(BaseModel):
     slippage_bps: float = Field(default=10.0, ge=0.0, le=50.0)
     enable_regime_timing: bool = True
     enable_technical_filter: bool = True
-    bull_mom_h120_weight: float = Field(default=0.10, ge=0.0, le=0.50)
-    bull_mom_ret20_weight: float = Field(default=0.08, ge=0.0, le=0.50)
+    bull_mom_h120_weight: float = Field(default=DEFAULT_BULL_MOM_H120_WEIGHT, ge=0.0, le=0.50)
+    bull_mom_ret20_weight: float = Field(default=DEFAULT_BULL_MOM_RET20_WEIGHT, ge=0.0, le=0.50)
+    drawdown_warn_pct: float = Field(default=DEFAULT_DRAWDOWN_WARN_PCT, ge=0.05, le=0.20)
+    warn_exposure_mult: float = Field(default=DEFAULT_WARN_EXPOSURE_MULT, ge=0.30, le=1.0)
     cash_yield_rate: float = Field(default=0.0, ge=0.0, le=0.05)
     include_heatmap: bool = True
     use_cache: bool = True
@@ -117,6 +125,8 @@ def _build_configs(req: BacktestRunRequest) -> tuple[LGBMConfig, BacktestConfig]
         enable_technical_filter=req.enable_technical_filter,
         bull_mom_h120_weight=req.bull_mom_h120_weight,
         bull_mom_ret20_weight=req.bull_mom_ret20_weight,
+        drawdown_warn_pct=req.drawdown_warn_pct,
+        warn_exposure_mult=req.warn_exposure_mult,
         cash_yield_rate=req.cash_yield_rate,
     )
     return lgbm_cfg, bt_cfg

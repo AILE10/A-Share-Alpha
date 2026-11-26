@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from app.broker.base import BaseBrokerAdapter, OrderReceipt, OrderRequest
 from app.core.calendar import today_cn
-from app.core.constants import LOT_SIZE
+from app.core.constants import DEFAULT_WARN_EXPOSURE_MULT, LOT_SIZE
 from app.core.logging import get_logger
 from app.db.models import PaperAccount, PaperPosition, RiskAuditLog, RiskConfig
 from app.db.sqlite_client import SQLiteDatabase, get_sqlite_db
@@ -195,8 +195,8 @@ class RiskMiddleware:
 
             order_notional = req.qty * req.ref_price
 
-            # 5) Single-stock weight cap (halved under WARNING state)
-            eff_single_cap = cfg["max_single_weight"] * (0.5 if fuse == "WARNING" else 1.0)
+            # 5) Single-stock weight cap (scaled to 70% under WARNING state, matching DrawdownFuseConfig)
+            eff_single_cap = cfg["max_single_weight"] * (DEFAULT_WARN_EXPOSURE_MULT if fuse == "WARNING" else 1.0)
             existing_mv = float(pos_map[req.ts_code].market_value) if req.ts_code in pos_map else 0.0
             proj_single_w = (existing_mv + order_notional) / total_equity
             if proj_single_w > eff_single_cap + 1e-4:

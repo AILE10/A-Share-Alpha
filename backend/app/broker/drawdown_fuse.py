@@ -6,14 +6,12 @@ RiskMiddleware (live paper & broker execution) so backtest and live risk control
 
 Guardrail guarantees:
   - Hard -12% drawdown redline (HALTED -> liquidate / block BUY + cooldown) is NEVER relaxed.
-  - -8% drawdown warning (WARNING -> scale down target exposure & single-stock cap) triggers immediately.
-  - Anti-trap recovery prevents an isolated extreme spike followed by a -8%~-12% pullback
-    from permanently locking exposure at half-speed for 12+ months during a subsequent bull market:
-      1) Rolling control-loop high-watermark (default 120 trading days, ~6 months) ages out ancient spikes.
-      2) Stabilization release: after `warn_stable_days` consecutive non-DEFENSIVE days without a
-         new equity trough AND with equity >= trailing MA, gracefully re-anchor the control peak and
-         exit WARNING back to NORMAL. During an active bear crash (DEFENSIVE or making new lows),
-         WARNING remains firmly locked.
+  - -11% drawdown warning (WARNING -> scale down target exposure & single-stock cap to 70%) triggers immediately
+    without trapping bull-market exposure at half-speed during routine -8%~-10% pullbacks.
+  - Anti-trap recovery prevents an isolated extreme spike followed by a pullback
+    from permanently locking exposure during a subsequent bull market:
+      1) Rolling control-loop high-watermark (default 90 trading days, ~4.5 months) ages out ancient spikes.
+      2) Optional stabilization release when `warn_stable_days > 0`.
   - NOTE: Reported backtest `max_drawdown` is ALWAYS computed on the true all-time equity curve,
     completely independent of the control-loop re-anchoring.
 """
@@ -22,13 +20,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.core.constants import (
+    DEFAULT_DRAWDOWN_HALT_PCT,
+    DEFAULT_DRAWDOWN_WARN_PCT,
+    DEFAULT_WARN_EXPOSURE_MULT,
+)
+
 
 @dataclass
 class DrawdownFuseConfig:
-    warn_pct: float = 0.08               # -8% triggers WARNING
-    halt_pct: float = 0.12               # -12% triggers HALTED (liquidate & block BUY)
-    warn_exposure_mult: float = 0.50     # Halve target exposure & single-stock cap during WARNING (matches RiskMiddleware)
-    warn_release_ratio: float = 0.60     # Exit WARNING when rolling control_dd > -warn_pct * 0.60 (-4.8%)
+    warn_pct: float = DEFAULT_DRAWDOWN_WARN_PCT        # -11% triggers WARNING (anti-bull-choke)
+    halt_pct: float = DEFAULT_DRAWDOWN_HALT_PCT        # -12% triggers HALTED (liquidate & block BUY)
+    warn_exposure_mult: float = DEFAULT_WARN_EXPOSURE_MULT  # Scale exposure & single cap to 70% during WARNING
+    warn_release_ratio: float = 0.60     # Exit WARNING when rolling control_dd > -warn_pct * 0.60 (-6.6%)
     halt_cooldown_days: int = 20         # Minimum trading days in HALTED before resuming
     rolling_peak_days: int = 90          # Trailing 90-day (~4.5m) high-watermark window (0 = legacy all-time peak)
     warn_stable_days: int = 0            # Optional stabilization release (0 = rely cleanly on rolling_peak_days)

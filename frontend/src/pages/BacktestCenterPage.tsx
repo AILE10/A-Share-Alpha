@@ -35,9 +35,9 @@ interface RunningJobState {
 
 const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
   {
-    label: '最优动态+Huber10日Bag6+强牛动量(推荐)',
+    label: '最优动态+Huber10日Bag6+120日新高突破(推荐)',
     values: {
-      name: '最优动态持有-Huber10日Bag6+强牛动量倾斜',
+      name: '最优动态持有-Huber10日Bag6+120日新高突破(Champion1b)',
       model_mode: 'regression',
       ensemble_seeds_count: 6,
       weight_method: 'risk_parity',
@@ -54,8 +54,8 @@ const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
       hard_stop_pct: 0.08,
       atr_stop_mult: 2.5,
       slippage_bps: 10,
-      bull_mom_h120_weight: 0.1,
-      bull_mom_ret20_weight: 0.08,
+      bull_mom_h120_weight: 0.25,
+      bull_mom_ret20_weight: 0,
       enable_regime_timing: true,
       enable_technical_filter: true,
       include_heatmap: true,
@@ -528,7 +528,7 @@ export const BacktestCenterPage: React.FC = () => {
             layout="vertical"
             size="small"
             initialValues={{
-              name: '最优动态持有-Huber10日Bag6+强牛动量(25年1月至今)',
+              name: '最优动态持有-Huber10日Bag6+120日新高突破(25年1月至今)',
               start_date: '2025-01-01',
               end_date: '',
               model_mode: 'regression',
@@ -548,8 +548,8 @@ export const BacktestCenterPage: React.FC = () => {
               hard_stop_pct: 0.08,
               atr_stop_mult: 2.5,
               slippage_bps: 10,
-              bull_mom_h120_weight: 0.1,
-              bull_mom_ret20_weight: 0.08,
+              bull_mom_h120_weight: 0.25,
+              bull_mom_ret20_weight: 0,
               cash_yield_rate: 0,
               enable_regime_timing: true,
               enable_technical_filter: true,
@@ -683,13 +683,13 @@ export const BacktestCenterPage: React.FC = () => {
             <div className="grid grid-cols-2 gap-2">
               <Form.Item
                 name="bull_mom_h120_weight"
-                label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：给模型打分温和叠加距120日新高 Z-Score（震荡/熊市=0）">强牛新高倾斜</Tooltip>}
+                label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：叠加距120日新高突破 Z-Score，捕捉无套牢盘主升浪龙头（默认 0.25，震荡/熊市=0）">强牛新高倾斜</Tooltip>}
               >
-                <InputNumber min={0} max={0.5} step={0.02} className="w-full" />
+                <InputNumber min={0} max={0.5} step={0.05} className="w-full" />
               </Form.Item>
               <Form.Item
                 name="bull_mom_ret20_weight"
-                label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：给模型打分温和叠加20日动量 Z-Score（震荡/熊市=0）">强牛动量倾斜</Tooltip>}
+                label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：20日短线动量 Z-Score（实证 A 股短线追高易反转，默认 0 关闭）">强牛动量倾斜</Tooltip>}
               >
                 <InputNumber min={0} max={0.5} step={0.02} className="w-full" />
               </Form.Item>
