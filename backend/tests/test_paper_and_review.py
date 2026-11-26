@@ -195,3 +195,41 @@ def test_recommender_single_pass_live_quotes_and_progress(tmp_path, real_db, sam
         assert all(r["trade_date"] == bundle.trade_date for r in bundle.recommendations)
     finally:
         sqlite.close()
+
+
+def test_daily_workflow_tracker_lifecycle_and_persistence(tmp_path):
+    """Verify the 5-step daily trading workflow tracker persists status transitions cleanly."""
+    from app.paper.workflow import DailyWorkflowTracker
+
+    sqlite = SQLiteDatabase(tmp_path / "wf_test.db")
+    tmp_duck = DuckDBClient(tmp_path / "wf_duck.duckdb")
+    try:
+        tracker = DailyWorkflowTracker(sqlite_db=sqlite)
+        st0 = tracker.get_workflow_status(db=tmp_duck, sqlite_db=sqlite)
+        assert len(st0["steps"]) == 5
+        assert [s["step_key"] for s in st0["steps"]] == [
+            "pre_market_unlock",
+            "intraday_monitor",
+            "rebalance_1440",
+            "post_market_sync",
+            "weekly_review",
+        ]
+
+        tracker.mark_running("pre_market_unlock", "解锁中...", trigger_source="AUTO")
+        st1 = tracker.get_workflow_status(db=tmp_duck, sqlite_db=sqlite)
+        s1 = {s["step_key"]: s for s in st1["steps"]}
+        assert s1["pre_market_unlock"]["status"] == "RUNNING"
+
+        tracker.mark_done("pre_market_unlock", "已解锁 2 只持仓", trigger_source="AUTO")
+        tracker.mark_failed("rebalance_1440", "模拟网络超时", trigger_source="MANUAL")
+        st2 = tracker.get_workflow_status(db=tmp_duck, sqlite_db=sqlite)
+        s2 = {s["step_key"]: s for s in st2["steps"]}
+        assert s2["pre_market_unlock"]["status"] == "DONE"
+        assert s2["pre_market_unlock"]["trigger_source"] == "AUTO"
+        assert "2 只持仓" in s2["pre_market_unlock"]["summary"]
+        assert s2["rebalance_1440"]["status"] == "FAILED"
+        assert s2["rebalance_1440"]["trigger_source"] == "MANUAL"
+        assert "模拟网络超时" in s2["rebalance_1440"]["summary"]
+    finally:
+        tmp_duck.close()
+        sqlite.close()

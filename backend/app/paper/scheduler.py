@@ -26,6 +26,7 @@ from app.db.duckdb_client import get_duckdb
 from app.factors.service import FactorEngine, to_jsonable
 from app.paper.reviewer import WeeklyReviewEngine
 from app.paper.service import PaperTradingService
+from app.paper.workflow import get_workflow_tracker
 from app.strategy.realtime_regime import get_realtime_regime_service
 from app.strategy.regime import compute_market_regime, persist_market_regime
 
@@ -53,43 +54,96 @@ class StudioScheduler:
     def _job_pre_market(self) -> None:
         if not self._is_open_today():
             return
+        wf = get_workflow_tracker()
+        wf.mark_running("pre_market_unlock", "09:26 自动执行盘前 T+1 持仓解锁...", trigger_source="AUTO")
         try:
-            self.paper.pre_market_unlock()
+            unlocked = self.paper.pre_market_unlock()
+            wf.mark_done(
+                "pre_market_unlock",
+                f"已完成盘前 T+1 解锁（解锁 {unlocked} 只持仓）",
+                trigger_source="AUTO",
+                detail={"unlocked": unlocked},
+            )
         except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("pre_market_unlock", str(exc), trigger_source="AUTO")
             logger.error("pre_market job failed: %s", exc)
 
     def _job_intraday(self) -> None:
         if not (self._is_open_today() and is_trading_session()):
             return
+        wf = get_workflow_tracker()
         try:
-            self.paper.intraday_refresh()
+            res = self.paper.intraday_refresh()
+            quoted = int(res.get("quoted_count", 0))
+            alerts = len(res.get("stop_alerts", []) or [])
+            rt = res.get("realtime_regime") or {}
+            reg_cn = {"OFFENSIVE": "强势进攻", "NEUTRAL": "震荡中性", "DEFENSIVE": "弱势防守"}.get(
+                str(rt.get("regime", "")), ""
+            )
+            extra = f" · 大盘 {reg_cn}" if reg_cn else ""
+            wf.mark_done(
+                "intraday_monitor",
+                f"实时盯市已刷新（行情 {quoted} 股，止损告警 {alerts} 条{extra}）",
+                trigger_source="AUTO",
+                detail={"quoted_count": quoted, "stop_alerts": alerts},
+            )
         except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("intraday_monitor", str(exc), trigger_source="AUTO")
             logger.error("intraday_refresh job failed: %s", exc)
 
     def _job_realtime_regime(self) -> None:
         if not (self._is_open_today() and is_trading_session()):
             return
         try:
-            get_realtime_regime_service().refresh(db=self.paper.db, broadcast=True)
+            snap = get_realtime_regime_service().refresh(db=self.paper.db, broadcast=True)
+            if snap:
+                reg_cn = {"OFFENSIVE": "强势进攻", "NEUTRAL": "震荡中性", "DEFENSIVE": "弱势防守"}.get(
+                    str(snap.get("regime", "")), str(snap.get("regime", ""))
+                )
+                exp_pct = int(round(float(snap.get("target_exposure") or 0.0) * 100))
+                q_cnt = int(snap.get("quoted_count") or 0)
+                get_workflow_tracker().mark_done(
+                    "intraday_monitor",
+                    f"实时大盘 {reg_cn} ({exp_pct}%) · 已扫描 {q_cnt} 股",
+                    trigger_source="AUTO",
+                    detail={"regime": snap.get("regime"), "quoted_count": q_cnt},
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("realtime_regime job failed: %s", exc)
 
     def _job_rebalance_1440(self) -> None:
         if not self._is_open_today():
             return
+        wf = get_workflow_tracker()
+        wf.mark_running("rebalance_1440", "14:40 自动重算全市场选股清单并执行调仓...", trigger_source="AUTO")
         try:
-            self.paper.run_rebalance()
+            res = self.paper.run_rebalance()
+            n_ord = len(res.get("orders_executed", []) or [])
+            n_pos = int(res.get("positions_count", 0))
+            reg = res.get("regime") or {}
+            reg_cn = {"OFFENSIVE": "强势进攻", "NEUTRAL": "震荡中性", "DEFENSIVE": "弱势防守"}.get(
+                str(reg.get("regime", "")), ""
+            )
+            wf.mark_done(
+                "rebalance_1440",
+                f"已完成 14:40 调仓（执行 {n_ord} 笔，当前持仓 {n_pos} 只 · {reg_cn}）",
+                trigger_source="AUTO",
+                detail={"orders": n_ord, "positions": n_pos, "regime": reg.get("regime")},
+            )
         except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("rebalance_1440", str(exc), trigger_source="AUTO")
             logger.error("rebalance_1440 job failed: %s", exc)
 
     def _job_post_market(self) -> None:
         if not self._is_open_today():
             return
+        wf = get_workflow_tracker()
+        wf.mark_running("post_market_sync", "15:30 自动增量同步收盘日线、重算因子并记账...", trigger_source="AUTO")
         try:
             db = get_duckdb()
             svc = DataSyncService(db)
             try:
-                svc.incremental_sync()
+                rep = svc.incremental_sync()
                 eng = FactorEngine(db)
                 f_run = eng.build(codes=None, compute_analysis=True)
                 eng.persist(f_run)
@@ -120,13 +174,30 @@ class StudioScheduler:
             finally:
                 svc.close()
             self.paper.record_daily_nav()
+            synced = getattr(rep, "stocks_synced", 0)
+            wf.mark_done(
+                "post_market_sync",
+                f"已完成收盘同步（更新 {synced} 股）、因子重算与当日净值记账",
+                trigger_source="AUTO",
+                detail={"stocks_synced": synced},
+            )
         except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("post_market_sync", str(exc), trigger_source="AUTO")
             logger.error("post_market sync job failed: %s", exc)
 
     def _job_weekly_review(self) -> None:
+        wf = get_workflow_tracker()
+        wf.mark_running("weekly_review", "周五 16:30 自动生成周度复盘与因子衰减体检...", trigger_source="AUTO")
         try:
-            self.reviewer.generate_review()
+            rev = self.reviewer.generate_review()
+            wf.mark_done(
+                "weekly_review",
+                f"周度复盘已生成（{rev.get('week_start', '')} ~ {rev.get('week_end', '')}）",
+                trigger_source="AUTO",
+                detail={"review_id": rev.get("review_id", "")},
+            )
         except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("weekly_review", str(exc), trigger_source="AUTO")
             logger.error("weekly_review job failed: %s", exc)
 
     def start(self) -> None:

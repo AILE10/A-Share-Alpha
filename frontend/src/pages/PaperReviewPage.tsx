@@ -12,6 +12,7 @@ import { aShareColor, api, fmtNum, fmtPct } from '../services/api';
 import { ModelVersionItem, WeeklyReviewItem } from '../types/quant';
 import { useAsyncTask } from '../hooks/useAsyncTask';
 import { TaskProgressBanner } from '../components/common/TaskProgressBanner';
+import { DailyWorkflowCard } from '../components/common/DailyWorkflowCard';
 
 export const PaperReviewPage: React.FC = () => {
   const [accountState, setAccountState] = useState<any>(null);
@@ -192,6 +193,9 @@ export const PaperReviewPage: React.FC = () => {
           </div>
         </div>
       </Modal>
+
+      {/* Daily Fixed Trading Workflow Flowchart & Live Execution Status */}
+      <DailyWorkflowCard onStepCompleted={() => loadAll()} />
 
       {/* Account Strip */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">

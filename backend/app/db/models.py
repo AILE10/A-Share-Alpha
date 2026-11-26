@@ -218,3 +218,19 @@ class RiskAuditLog(Base):
     rule_name: Mapped[str] = mapped_column(String(64))
     decision: Mapped[str] = mapped_column(String(16))  # PASS / REJECT / CLIPPED
     detail_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class DailyWorkflowRun(Base):
+    __tablename__ = "daily_workflow_runs"
+    __table_args__ = (UniqueConstraint("trade_date", "step_key", name="uq_workflow_date_step"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    step_key: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="PENDING")  # PENDING / RUNNING / DONE / FAILED
+    trigger_source: Mapped[str] = mapped_column(String(16), default="AUTO")  # AUTO / MANUAL
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_cn, onupdate=_utcnow_cn)

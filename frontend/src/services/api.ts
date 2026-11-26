@@ -14,6 +14,7 @@ export const api = {
 
   // Dashboard & Data
   getDashboardSummary: () => http.get('/dashboard/summary').then((r) => r.data),
+  getDailyWorkflow: () => http.get('/dashboard/workflow').then((r) => r.data),
   refreshRealtimeRegime: () => http.post('/dashboard/regime/refresh').then((r) => r.data),
   refreshRealtimeRegimeAsync: () => http.post('/dashboard/regime/refresh-async').then((r) => r.data),
   getDataStatus: () => http.get('/data/status').then((r) => r.data),
@@ -56,6 +57,7 @@ export const api = {
   // Paper Trading, Weekly Review & Models
   getPaperAccount: () => http.get('/paper/account').then((r) => r.data),
   getPaperNav: () => http.get('/paper/nav').then((r) => r.data),
+  triggerPreMarketUnlockAsync: () => http.post('/paper/pre-market-unlock-async').then((r) => r.data),
   triggerIntradayRefresh: () => http.post('/paper/intraday-refresh').then((r) => r.data),
   triggerIntradayRefreshAsync: () => http.post('/paper/intraday-refresh-async').then((r) => r.data),
   triggerPaperRebalance: (fetchLiveQuotes = true) =>

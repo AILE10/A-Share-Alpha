@@ -23,6 +23,7 @@ from app.db.models import BacktestRun
 from app.db.sqlite_client import get_sqlite_db
 from app.factors.service import FactorEngine, to_jsonable
 from app.paper.service import PaperTradingService
+from app.paper.workflow import get_workflow_tracker
 from app.strategy.realtime_regime import get_realtime_regime_service
 from app.strategy.regime import compute_market_regime, persist_market_regime
 
@@ -214,8 +215,15 @@ def get_dashboard_summary() -> dict:
             "drawdown_halt": -risk_cfg["drawdown_halt_pct"],
             "fuse_status": acct_state.get("account", {}).get("fuse_status", "NORMAL"),
         },
+        "daily_workflow": get_workflow_tracker().get_workflow_status(db=db, sqlite_db=sqlite),
         "ws_clients": ws_manager.active_count,
     })
+
+
+@router.get("/dashboard/workflow")
+def get_daily_workflow() -> dict:
+    """Return live 5-step daily trading pipeline flowchart status."""
+    return get_workflow_tracker().get_workflow_status(db=get_duckdb(), sqlite_db=get_sqlite_db())
 
 
 @router.post("/dashboard/regime/refresh")
@@ -234,7 +242,20 @@ def refresh_realtime_regime() -> dict:
 def refresh_realtime_regime_async() -> dict:
     """Non-blocking real-time full-market Regime refresh with live WebSocket & polling progress."""
     def _run(emit):
-        return get_realtime_regime_service().refresh(db=get_duckdb(), broadcast=True, progress_cb=emit)
+        snap = get_realtime_regime_service().refresh(db=get_duckdb(), broadcast=True, progress_cb=emit)
+        if snap:
+            reg_cn = {"OFFENSIVE": "强势进攻", "NEUTRAL": "震荡中性", "DEFENSIVE": "弱势防守"}.get(
+                str(snap.get("regime", "")), str(snap.get("regime", ""))
+            )
+            exp_pct = int(round(float(snap.get("target_exposure") or 0.0) * 100))
+            q_cnt = int(snap.get("quoted_count") or 0)
+            get_workflow_tracker().mark_done(
+                "intraday_monitor",
+                f"实时大盘 {reg_cn} ({exp_pct}%) · 已扫描 {q_cnt} 股",
+                trigger_source="MANUAL",
+                detail={"regime": snap.get("regime"), "quoted_count": q_cnt},
+            )
+        return snap
 
     return action_task_manager.submit(
         kind="regime_refresh",
@@ -385,21 +406,35 @@ def trigger_data_sync(req: SyncRequest) -> dict:
                 svc.sync_capital_flow(codes, rep)
                 out = {"report": rep.to_dict()}
             else:
-                rep = svc.incremental_sync(
-                    workers=max(1, min(req.workers, 12)),
-                    progress=lambda msg, p: _both(msg, 0.04 + 0.80 * p),
-                )
-                _both("正在重算最新收盘大盘择时状态与四维因子...", 0.88)
-                eng = FactorEngine(svc.db)
-                f_run = eng.build(codes=None, compute_analysis=True)
-                eng.persist(f_run)
-                persist_market_regime(compute_market_regime(f_run.panel), svc.db)
-                get_realtime_regime_service().clear_cache()
+                wf = get_workflow_tracker()
+                wf.mark_running("post_market_sync", "正在手动增量同步收盘日线与大盘状态...", trigger_source="MANUAL")
                 try:
-                    get_realtime_regime_service().refresh(db=svc.db, broadcast=True)
-                except Exception:  # noqa: BLE001
-                    pass
-                out = {"report": rep.to_dict()}
+                    rep = svc.incremental_sync(
+                        workers=max(1, min(req.workers, 12)),
+                        progress=lambda msg, p: _both(msg, 0.04 + 0.78 * p),
+                    )
+                    _both("正在重算最新收盘大盘择时状态与四维因子...", 0.86)
+                    eng = FactorEngine(svc.db)
+                    f_run = eng.build(codes=None, compute_analysis=True)
+                    eng.persist(f_run)
+                    persist_market_regime(compute_market_regime(f_run.panel), svc.db)
+                    get_realtime_regime_service().clear_cache()
+                    try:
+                        get_realtime_regime_service().refresh(db=svc.db, broadcast=True)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _both("正在更新当日模拟盘净值与基准对账...", 0.96)
+                    PaperTradingService(svc.db, get_sqlite_db()).record_daily_nav()
+                    wf.mark_done(
+                        "post_market_sync",
+                        f"已手动完成收盘同步（更新 {rep.stocks_synced} 股）、因子重算与净值记账",
+                        trigger_source="MANUAL",
+                        detail={"stocks_synced": rep.stocks_synced},
+                    )
+                    out = {"report": rep.to_dict()}
+                except Exception as exc:  # noqa: BLE001
+                    wf.mark_failed("post_market_sync", str(exc), trigger_source="MANUAL")
+                    raise
 
             ws_manager.broadcast_threadsafe(
                 "task_progress",

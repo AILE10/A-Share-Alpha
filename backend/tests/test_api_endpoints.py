@@ -17,6 +17,7 @@ def test_openapi_routes_registered():
         "/api/v1/tasks/{task_id}",
         "/api/v1/ws/stream",
         "/api/v1/dashboard/summary",
+        "/api/v1/dashboard/workflow",
         "/api/v1/dashboard/regime/refresh",
         "/api/v1/dashboard/regime/refresh-async",
         "/api/v1/data/status",
@@ -36,6 +37,7 @@ def test_openapi_routes_registered():
         "/api/v1/signals/refresh-async",
         "/api/v1/signals/kline/{ts_code}",
         "/api/v1/paper/account",
+        "/api/v1/paper/pre-market-unlock-async",
         "/api/v1/paper/intraday-refresh-async",
         "/api/v1/paper/rebalance-async",
         "/api/v1/paper/reset",
@@ -58,6 +60,10 @@ def test_core_routers_on_real_data(real_db, sample_codes):
     dash = dashboard.get_dashboard_summary()
     assert dash["regime"]["regime"] in ("OFFENSIVE", "NEUTRAL", "DEFENSIVE")
     assert "risk_watermarks" in dash
+    assert "daily_workflow" in dash and len(dash["daily_workflow"]["steps"]) == 5
+
+    wf = dashboard.get_daily_workflow()
+    assert len(wf["steps"]) == 5
 
     fac = factors.get_factors_summary(horizon=5, decay_window=20)
     assert len(fac["factors"]) == len(ALL_FACTOR_NAMES) == 20

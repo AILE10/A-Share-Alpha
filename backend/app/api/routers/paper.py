@@ -16,6 +16,7 @@ from app.factors.service import to_jsonable
 from app.ml.model_registry import ModelRegistry
 from app.paper.reviewer import WeeklyReviewEngine
 from app.paper.service import PaperTradingService
+from app.paper.workflow import get_workflow_tracker
 
 router = APIRouter(tags=["Paper Trading, Review & Models"])
 
@@ -53,17 +54,80 @@ def get_paper_nav() -> list[dict]:
     return to_jsonable(paper.get_nav_history())
 
 
+@router.post("/paper/pre-market-unlock-async")
+def trigger_pre_market_unlock_async() -> dict:
+    def _run(emit):
+        wf = get_workflow_tracker()
+        wf.mark_running("pre_market_unlock", "正在执行盘前 T+1 持仓解锁...", trigger_source="MANUAL")
+        emit("正在解锁昨日买入 T+1 持仓...", 0.35)
+        try:
+            paper = PaperTradingService(get_duckdb(), get_sqlite_db())
+            unlocked = paper.pre_market_unlock()
+            emit(f"已完成 T+1 解锁（共解锁 {unlocked} 只持仓）", 1.0)
+            wf.mark_done(
+                "pre_market_unlock",
+                f"已手动完成 T+1 解锁（解锁 {unlocked} 只持仓）",
+                trigger_source="MANUAL",
+                detail={"unlocked": unlocked},
+            )
+            return {"ok": True, "unlocked": unlocked}
+        except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("pre_market_unlock", str(exc), trigger_source="MANUAL")
+            raise
+
+    return action_task_manager.submit(
+        kind="pre_market_unlock",
+        title="盘前 T+1 持仓解锁",
+        fn=_run,
+    )
+
+
 @router.post("/paper/intraday-refresh")
 def trigger_intraday_refresh() -> dict:
-    paper = PaperTradingService(get_duckdb(), get_sqlite_db())
-    return to_jsonable(paper.intraday_refresh(candidate_codes=_sample_codes()))
+    wf = get_workflow_tracker()
+    wf.mark_running("intraday_monitor", "正在刷新盘中实时快照与大盘状态...", trigger_source="MANUAL")
+    try:
+        paper = PaperTradingService(get_duckdb(), get_sqlite_db())
+        res = paper.intraday_refresh(candidate_codes=_sample_codes())
+        quoted = int(res.get("quoted_count", 0))
+        alerts = len(res.get("stop_alerts", []) or [])
+        wf.mark_done(
+            "intraday_monitor",
+            f"已手动刷新盯市（行情 {quoted} 股，止损告警 {alerts} 条）",
+            trigger_source="MANUAL",
+            detail={"quoted_count": quoted, "stop_alerts": alerts},
+        )
+        return to_jsonable(res)
+    except Exception as exc:  # noqa: BLE001
+        wf.mark_failed("intraday_monitor", str(exc), trigger_source="MANUAL")
+        raise
 
 
 @router.post("/paper/intraday-refresh-async")
 def trigger_intraday_refresh_async() -> dict:
     def _run(emit):
-        paper = PaperTradingService(get_duckdb(), get_sqlite_db())
-        return paper.intraday_refresh(candidate_codes=_sample_codes(), progress_cb=emit)
+        wf = get_workflow_tracker()
+        wf.mark_running("intraday_monitor", "正在刷新盘中实时快照与大盘状态...", trigger_source="MANUAL")
+        try:
+            paper = PaperTradingService(get_duckdb(), get_sqlite_db())
+            res = paper.intraday_refresh(candidate_codes=_sample_codes(), progress_cb=emit)
+            quoted = int(res.get("quoted_count", 0))
+            alerts = len(res.get("stop_alerts", []) or [])
+            rt = res.get("realtime_regime") or {}
+            reg_cn = {"OFFENSIVE": "强势进攻", "NEUTRAL": "震荡中性", "DEFENSIVE": "弱势防守"}.get(
+                str(rt.get("regime", "")), ""
+            )
+            extra = f" · 大盘 {reg_cn}" if reg_cn else ""
+            wf.mark_done(
+                "intraday_monitor",
+                f"已手动刷新盯市（行情 {quoted} 股，止损告警 {alerts} 条{extra}）",
+                trigger_source="MANUAL",
+                detail={"quoted_count": quoted, "stop_alerts": alerts},
+            )
+            return res
+        except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("intraday_monitor", str(exc), trigger_source="MANUAL")
+            raise
 
     return action_task_manager.submit(
         kind="paper_intraday",
@@ -74,19 +138,53 @@ def trigger_intraday_refresh_async() -> dict:
 
 @router.post("/paper/rebalance")
 def trigger_paper_rebalance(req: RebalanceRequest = RebalanceRequest()) -> dict:
-    paper = PaperTradingService(get_duckdb(), get_sqlite_db())
-    return to_jsonable(paper.run_rebalance(codes=_sample_codes(), fetch_live_quotes=req.fetch_live_quotes))
+    wf = get_workflow_tracker()
+    wf.mark_running("rebalance_1440", "正在重算全市场选股并执行调仓...", trigger_source="MANUAL")
+    try:
+        paper = PaperTradingService(get_duckdb(), get_sqlite_db())
+        res = paper.run_rebalance(codes=_sample_codes(), fetch_live_quotes=req.fetch_live_quotes)
+        n_ord = len(res.get("orders_executed", []) or [])
+        n_pos = int(res.get("positions_count", 0))
+        wf.mark_done(
+            "rebalance_1440",
+            f"已手动完成调仓（执行 {n_ord} 笔，当前持仓 {n_pos} 只）",
+            trigger_source="MANUAL",
+            detail={"orders": n_ord, "positions": n_pos},
+        )
+        return to_jsonable(res)
+    except Exception as exc:  # noqa: BLE001
+        wf.mark_failed("rebalance_1440", str(exc), trigger_source="MANUAL")
+        raise
 
 
 @router.post("/paper/rebalance-async")
 def trigger_paper_rebalance_async(req: RebalanceRequest = RebalanceRequest()) -> dict:
     def _run(emit):
-        paper = PaperTradingService(get_duckdb(), get_sqlite_db())
-        return paper.run_rebalance(
-            codes=_sample_codes(),
-            fetch_live_quotes=req.fetch_live_quotes,
-            progress_cb=emit,
-        )
+        wf = get_workflow_tracker()
+        wf.mark_running("rebalance_1440", "正在重算全市场选股并执行模拟盘调仓...", trigger_source="MANUAL")
+        try:
+            paper = PaperTradingService(get_duckdb(), get_sqlite_db())
+            res = paper.run_rebalance(
+                codes=_sample_codes(),
+                fetch_live_quotes=req.fetch_live_quotes,
+                progress_cb=emit,
+            )
+            n_ord = len(res.get("orders_executed", []) or [])
+            n_pos = int(res.get("positions_count", 0))
+            reg = res.get("regime") or {}
+            reg_cn = {"OFFENSIVE": "强势进攻", "NEUTRAL": "震荡中性", "DEFENSIVE": "弱势防守"}.get(
+                str(reg.get("regime", "")), ""
+            )
+            wf.mark_done(
+                "rebalance_1440",
+                f"已手动完成调仓（执行 {n_ord} 笔，当前持仓 {n_pos} 只 · {reg_cn}）",
+                trigger_source="MANUAL",
+                detail={"orders": n_ord, "positions": n_pos, "regime": reg.get("regime")},
+            )
+            return res
+        except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("rebalance_1440", str(exc), trigger_source="MANUAL")
+            raise
 
     return action_task_manager.submit(
         kind="paper_rebalance",
@@ -120,15 +218,41 @@ def list_weekly_reviews(limit: int = 20) -> list[dict]:
 
 @router.post("/paper/reviews/generate")
 def generate_weekly_review() -> dict:
-    eng = WeeklyReviewEngine(get_duckdb(), get_sqlite_db())
-    return to_jsonable(eng.generate_review())
+    wf = get_workflow_tracker()
+    wf.mark_running("weekly_review", "正在生成周度复盘与因子衰减报告...", trigger_source="MANUAL")
+    try:
+        eng = WeeklyReviewEngine(get_duckdb(), get_sqlite_db())
+        rev = eng.generate_review()
+        wf.mark_done(
+            "weekly_review",
+            f"已手动生成周度复盘（{rev.get('week_start', '')} ~ {rev.get('week_end', '')}）",
+            trigger_source="MANUAL",
+            detail={"review_id": rev.get("review_id", "")},
+        )
+        return to_jsonable(rev)
+    except Exception as exc:  # noqa: BLE001
+        wf.mark_failed("weekly_review", str(exc), trigger_source="MANUAL")
+        raise
 
 
 @router.post("/paper/reviews/generate-async")
 def generate_weekly_review_async() -> dict:
     def _run(emit):
-        eng = WeeklyReviewEngine(get_duckdb(), get_sqlite_db())
-        return eng.generate_review(progress_cb=emit)
+        wf = get_workflow_tracker()
+        wf.mark_running("weekly_review", "正在生成周度复盘与 20 日因子衰减归因...", trigger_source="MANUAL")
+        try:
+            eng = WeeklyReviewEngine(get_duckdb(), get_sqlite_db())
+            rev = eng.generate_review(progress_cb=emit)
+            wf.mark_done(
+                "weekly_review",
+                f"已手动生成周度复盘（{rev.get('week_start', '')} ~ {rev.get('week_end', '')}）",
+                trigger_source="MANUAL",
+                detail={"review_id": rev.get("review_id", "")},
+            )
+            return rev
+        except Exception as exc:  # noqa: BLE001
+            wf.mark_failed("weekly_review", str(exc), trigger_source="MANUAL")
+            raise
 
     return action_task_manager.submit(
         kind="weekly_review",

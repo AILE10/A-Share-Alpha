@@ -5,6 +5,7 @@ import { aShareColor, api, fmtNum, fmtPct } from '../services/api';
 import { useAlphaWebSocket } from '../services/ws';
 import { useAsyncTask } from '../hooks/useAsyncTask';
 import { TaskProgressBanner } from '../components/common/TaskProgressBanner';
+import { DailyWorkflowCard } from '../components/common/DailyWorkflowCard';
 import { EChartsBox } from '../components/charts/EChartsBox';
 
 export const DashboardPage: React.FC = () => {
@@ -428,6 +429,12 @@ export const DashboardPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Daily Fixed Trading Workflow Flowchart & Live Execution Status */}
+      <DailyWorkflowCard
+        initialWorkflow={data?.daily_workflow || null}
+        onStepCompleted={() => load(false)}
+      />
 
       {/* Main Charts */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
