@@ -38,12 +38,63 @@ class FactorAnalysis:
 
 def quintile_returns(score: np.ndarray, fwd: np.ndarray, n_groups: int = 5, min_n: int = 15) -> list[float]:
     mask = ~(np.isnan(score) | np.isnan(fwd))
-    if mask.sum() < min_n:
+    n = int(mask.sum())
+    if n < min_n:
         return [np.nan] * n_groups
     s, r = score[mask], fwd[mask]
-    ranks = pd.Series(s).rank(method="first").to_numpy()
-    groups = np.ceil(ranks / len(s) * n_groups).astype(int).clip(1, n_groups)
-    return [float(r[groups == g].mean()) if np.any(groups == g) else np.nan for g in range(1, n_groups + 1)]
+    # Stable mergesort reproduces pd.Series.rank(method="first") identically without Series overhead
+    order = np.argsort(s, kind="mergesort")
+    r_sorted = r[order]
+    ranks = np.arange(1, n + 1, dtype=float)
+    groups = np.clip(np.ceil(ranks / n * n_groups).astype(int), 1, n_groups)
+    return [float(r_sorted[groups == g].mean()) if np.any(groups == g) else np.nan for g in range(1, n_groups + 1)]
+
+
+def _vectorized_row_pearson(
+    a: np.ndarray,
+    b: np.ndarray,
+    valid: np.ndarray,
+    ns: np.ndarray,
+    min_n: int = 10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute exact per-row Pearson correlation & non-constant validity mask in vectorized NumPy."""
+    safe_n = np.maximum(ns, 1).astype(float)
+    a0 = np.where(valid, a, 0.0)
+    b0 = np.where(valid, b, 0.0)
+    ma = a0.sum(axis=1, keepdims=True) / safe_n[:, None]
+    mb = b0.sum(axis=1, keepdims=True) / safe_n[:, None]
+    da = np.where(valid, a - ma, 0.0)
+    db = np.where(valid, b - mb, 0.0)
+    va = (da * da).sum(axis=1) / safe_n
+    vb = (db * db).sum(axis=1) / safe_n
+    ok = (ns >= min_n) & (np.sqrt(np.maximum(va, 0.0)) >= 1e-12) & (np.sqrt(np.maximum(vb, 0.0)) >= 1e-12)
+    cov = (da * db).sum(axis=1) / safe_n
+    denom = np.sqrt(np.maximum(va * vb, 0.0))
+    corr = np.where(ok & (denom > 0.0), cov / np.where(denom > 0.0, denom, 1.0), np.nan)
+    return np.clip(corr, -1.0, 1.0), ok
+
+
+def _vectorized_cross_ic(
+    arr: np.ndarray,
+    fwd_arr: np.ndarray,
+    valid_label_dates: np.ndarray,
+    min_n: int = 10,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized cross-sectional Pearson IC & Spearman RankIC matching cross_ic() identically."""
+    valid = (~np.isnan(arr)) & (~np.isnan(fwd_arr)) & valid_label_dates[:, None]
+    ns = valid.sum(axis=1).astype(int)
+    ics, ok_raw = _vectorized_row_pearson(arr, fwd_arr, valid, ns, min_n=min_n)
+
+    # Rank only non-empty valid rows via Cython DataFrame.rank(axis=1)
+    rics = np.full(len(ns), np.nan, dtype=float)
+    if np.any(ok_raw):
+        sub_idx = np.flatnonzero(ok_raw)
+        v_sub = valid[sub_idx]
+        ra = pd.DataFrame(np.where(v_sub, arr[sub_idx], np.nan)).rank(axis=1, method="average").to_numpy(dtype=float)
+        rb = pd.DataFrame(np.where(v_sub, fwd_arr[sub_idx], np.nan)).rank(axis=1, method="average").to_numpy(dtype=float)
+        r_sub, _ = _vectorized_row_pearson(ra, rb, v_sub, ns[sub_idx], min_n=min_n)
+        rics[sub_idx] = r_sub
+    return ics, rics, ns
 
 
 def analyze_factors(
@@ -60,17 +111,17 @@ def analyze_factors(
     valid_label_dates = ~np.isnan(fwd_arr).all(axis=1)
     rebalance_idx = np.arange(0, len(dates), horizon)
 
+    # Align and mask each standardized factor matrix ONCE (reused for IC, quintiles, and correlation)
+    aligned_arrs: dict[str, np.ndarray] = {
+        name: df.reindex_like(eligible).where(eligible).to_numpy(dtype=float)
+        for name, df in std.items()
+    }
+
     rows = []
     navs: dict[str, pd.DataFrame] = {}
     summary_rows = []
-    for name, df in std.items():
-        arr = df.reindex_like(eligible).where(eligible).to_numpy(dtype=float)
-        ics, rics, ns = [], [], []
-        for i in range(len(dates)):
-            ic, ric, n = cross_ic(arr[i], fwd_arr[i]) if valid_label_dates[i] else (np.nan, np.nan, 0)
-            ics.append(ic)
-            rics.append(ric)
-            ns.append(n)
+    for name, arr in aligned_arrs.items():
+        ics, rics, ns = _vectorized_cross_ic(arr, fwd_arr, valid_label_dates)
         qrets = np.full((len(dates), 5), np.nan)
         for i in rebalance_idx:
             if valid_label_dates[i]:
@@ -132,26 +183,27 @@ def analyze_factors(
             "recent_rank_ic_20d": recent_mean, "decay_status": decay,
             "ls_annual_return": ls_ann, "quintile_monotonicity": mono,
             "n_periods": int(len(ric_nov)),
-            "avg_sample_size": float(np.nanmean(ns)) if ns else 0.0,
+            "avg_sample_size": float(np.nanmean(ns)) if len(ns) else 0.0,
             "data_status": (status or {}).get(name, "OK"),
         })
 
     # Mean cross-sectional Spearman correlation matrix (per-pair valid counts so partial factors stay exact)
-    names = list(std.keys())
+    names = list(aligned_arrs.keys())
     k = len(names)
     corr_acc = np.zeros((k, k), dtype=float)
     pair_cnt = np.zeros((k, k), dtype=float)
     for i in rebalance_idx:
-        mat = np.column_stack([std[n].reindex_like(eligible).where(eligible).iloc[i].to_numpy(dtype=float) for n in names])
+        mat = np.column_stack([aligned_arrs[n][i] for n in names])
         # drop all-NaN rows (ineligible stocks)
         active_rows = ~np.isnan(mat).all(axis=1)
         if active_rows.sum() < 10:
             continue
         sub = pd.DataFrame(mat[active_rows], columns=names)
         # treat constant-zero degraded columns on date i as NaN so they don't dilute average correlation
-        for col in names:
-            if sub[col].std() < 1e-12:
-                sub[col] = np.nan
+        col_stds = sub.std(numeric_only=True)
+        const_cols = col_stds[col_stds < 1e-12].index
+        if len(const_cols) > 0:
+            sub[const_cols] = np.nan
         c = sub.rank().corr().to_numpy(dtype=float)
         valid = ~np.isnan(c)
         corr_acc[valid] += c[valid]

@@ -163,6 +163,10 @@ class ModelRegistry:
         duckdb_client: DuckDBClient | None = None,
         label_horizon: int = 10,
         ensemble_seeds: tuple[int, ...] = DEFAULT_ENSEMBLE_SEEDS,
+        n_estimators: int = 120,
+        train_window: int = 252,
+        test_window: int = 63,
+        factor_run=None,
         progress_cb: Callable[[str, float], None] | None = None,
     ) -> tuple[dict, WalkForwardMLResult]:
         def _emit(stage: str, pct: float) -> None:
@@ -170,15 +174,21 @@ class ModelRegistry:
                 progress_cb(stage, pct)
 
         db = duckdb_client or get_duckdb()
-        _emit("正在加载全市场行情面板并计算四维 20 因子...", 0.08)
-        f_run = FactorEngine(db).build(codes=codes, horizon=label_horizon, compute_analysis=False)
+        if factor_run is not None:
+            f_run = factor_run
+        else:
+            _emit("正在加载全市场行情面板并计算四维 20 因子...", 0.08)
+            f_run = FactorEngine(db).build(codes=codes, horizon=label_horizon, compute_analysis=False)
         _emit(f"正在构建 {len(f_run.panel.codes)} 股未来 {label_horizon} 日超额标签...", 0.22)
         fwd_ex = forward_excess_returns(f_run.panel, horizon=label_horizon)
         embargo = max(5, int(label_horizon))
         cfg = LGBMConfig(
             mode=model_type,  # type: ignore[arg-type]
+            train_window=train_window,
+            test_window=test_window,
             label_horizon=label_horizon,
             embargo_days=embargo,
+            n_estimators=n_estimators,
             ensemble_seeds=ensemble_seeds,
             feature_names=feature_names if feature_names else list(f_run.std.keys()),
         )

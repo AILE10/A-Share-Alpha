@@ -359,7 +359,9 @@ class AKShareProvider(DataProvider):
         out = df[DAILY_BAR_COLUMNS].copy()
         if adjust == "":
             out["adj_factor"] = adj_arr
-            out.attrs["corporate_actions"] = pd.DataFrame(ca_records) if ca_records else pd.DataFrame()
+            # Store plain list[dict] (never a DataFrame) in attrs so pd.concat() attrs equality never raises
+            # `ValueError: The truth value of a DataFrame is ambiguous` across pandas versions.
+            out.attrs["corporate_actions"] = list(ca_records)
         return out
 
     def _throttle(self) -> None:

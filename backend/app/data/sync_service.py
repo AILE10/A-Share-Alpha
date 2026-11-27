@@ -387,6 +387,25 @@ class DataSyncService:
             bars.attrs["corporate_actions"] = ca_attr
         return bars
 
+    @staticmethod
+    def _extract_corporate_actions(bars: pd.DataFrame) -> pd.DataFrame | None:
+        """Pop corporate_actions metadata and clear bars.attrs so pd.concat() never fails on non-scalar attrs."""
+        raw = bars.attrs.pop("corporate_actions", None)
+        bars.attrs.clear()
+        if raw is None:
+            return None
+        if isinstance(raw, pd.DataFrame):
+            if raw.empty:
+                return None
+            out = raw.copy()
+            out.attrs.clear()
+            return out
+        if isinstance(raw, list) and raw:
+            out = pd.DataFrame(raw)
+            out.attrs.clear()
+            return out if not out.empty else None
+        return None
+
     def sync_daily_bars(
         self,
         ts_codes: list[str],
@@ -445,8 +464,10 @@ class DataSyncService:
                     total_mv = close_arr * ts_share
                     bars["total_mv"] = np.where(np.isnan(total_mv), bars["circ_mv"], total_mv)
 
-                    calc_pb = np.where((~np.isnan(bps)) & (bps > 1e-6), close_arr / bps, np.nan)
-                    calc_pe = np.where((~np.isnan(eps_ttm)) & (np.abs(eps_ttm) > 1e-6), close_arr / eps_ttm, np.nan)
+                    safe_bps = np.where((~np.isnan(bps)) & (bps > 1e-6), bps, np.nan)
+                    safe_eps = np.where((~np.isnan(eps_ttm)) & (np.abs(eps_ttm) > 1e-6), eps_ttm, np.nan)
+                    calc_pb = close_arr / safe_bps
+                    calc_pe = close_arr / safe_eps
                     bars["pb"] = bars["pb"].where(bars["pb"].notna(), calc_pb)
                     bars["pe_ttm"] = bars["pe_ttm"].where(bars["pe_ttm"].notna(), calc_pe)
                 else:
@@ -454,8 +475,8 @@ class DataSyncService:
 
                 bars["source"] = source
                 bars = self._anchor_adj_factor(code, bars)
-                ca_df = bars.attrs.get("corporate_actions")
-                if isinstance(ca_df, pd.DataFrame) and not ca_df.empty:
+                ca_df = self._extract_corporate_actions(bars)
+                if ca_df is not None and not ca_df.empty:
                     self.db.upsert_df("corporate_actions", ca_df)
                 report.bar_rows += self.db.upsert_df("daily_bars", bars)
                 report.stocks_synced += 1
@@ -1032,8 +1053,10 @@ class DataSyncService:
 
                     total_mv = close_arr * ts_share
                     bars["total_mv"] = np.where(np.isnan(total_mv), bars["circ_mv"], total_mv)
-                    calc_pb = np.where((~np.isnan(bps)) & (bps > 1e-6), close_arr / bps, np.nan)
-                    calc_pe = np.where((~np.isnan(eps_ttm)) & (np.abs(eps_ttm) > 1e-6), close_arr / eps_ttm, np.nan)
+                    safe_bps = np.where((~np.isnan(bps)) & (bps > 1e-6), bps, np.nan)
+                    safe_eps = np.where((~np.isnan(eps_ttm)) & (np.abs(eps_ttm) > 1e-6), eps_ttm, np.nan)
+                    calc_pb = close_arr / safe_bps
+                    calc_pe = close_arr / safe_eps
                     bars["pb"] = bars["pb"].where(bars["pb"].notna(), calc_pb)
                     bars["pe_ttm"] = bars["pe_ttm"].where(bars["pe_ttm"].notna(), calc_pe)
                 else:
@@ -1042,8 +1065,7 @@ class DataSyncService:
                 bars["source"] = source
                 bars["ts_code"] = code
                 bars = self._anchor_adj_factor(code, bars, anchor_map=anchor_map)
-                ca_df = bars.attrs.get("corporate_actions")
-                ca_out = ca_df if (isinstance(ca_df, pd.DataFrame) and not ca_df.empty) else None
+                ca_out = self._extract_corporate_actions(bars)
                 return code, bars, ca_out, source, ""
             except Exception as exc:  # noqa: BLE001
                 return code, None, None, "", str(exc)
@@ -1056,10 +1078,14 @@ class DataSyncService:
 
         def _flush_buffer() -> None:
             if ca_buffer:
+                for df_ca in ca_buffer:
+                    df_ca.attrs.clear()
                 self.db.upsert_df("corporate_actions", pd.concat(ca_buffer, ignore_index=True))
                 ca_buffer.clear()
             if not buffer_frames:
                 return
+            for df_b in buffer_frames:
+                df_b.attrs.clear()
             combined = pd.concat(buffer_frames, ignore_index=True)
             report.bar_rows += self.db.upsert_df("daily_bars", combined)
             buffer_frames.clear()

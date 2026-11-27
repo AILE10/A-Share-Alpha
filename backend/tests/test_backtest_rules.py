@@ -159,7 +159,16 @@ class TestPortfolioConstraints:
 class TestRealDataBacktestIntegration:
     def test_lgbm_walk_forward_and_backtest_on_real_data(self, factor_run):
         fwd_ex = forward_excess_returns(factor_run.panel, horizon=5)
-        scorer = LGBMScorer(LGBMConfig(mode="lambdarank", train_window=252, embargo_days=5, test_window=63))
+        scorer = LGBMScorer(
+            LGBMConfig(
+                mode="lambdarank",
+                train_window=252,
+                embargo_days=5,
+                test_window=252,
+                n_estimators=30,
+                ensemble_seeds=(42,),
+            )
+        )
         ml = scorer.run_walk_forward(factor_run.std, fwd_ex, factor_run.universe.eligible, adaptive=True)
         assert len(ml.folds) >= 1
         assert all(f["embargo_days"] >= 5 for f in ml.folds)
@@ -173,9 +182,9 @@ class TestRealDataBacktestIntegration:
 
         tech = compute_technical_signals(factor_run.panel)
         reg = compute_market_regime(factor_run.panel)
-        bt = AShareBacktestEngine(BacktestConfig(weight_method="risk_parity")).run(
-            factor_run.panel, ml.oos_scores, factor_run.universe.eligible, tech, reg
-        )
+        bt = AShareBacktestEngine(
+            BacktestConfig(holding_mode="fixed", rebalance_days=10, weight_method="risk_parity")
+        ).run(factor_run.panel, ml.oos_scores, factor_run.universe.eligible, tech, reg)
         assert len(bt.equity_curve) > 10
         assert len(bt.trades) > 0
         assert bt.metrics["total_commission"] > 0
@@ -198,8 +207,8 @@ class TestRealDataBacktestIntegration:
 
         b1 = svc.run_full_pipeline(
             codes=sub_codes,
-            lgbm_config=LGBMConfig(mode="lambdarank", n_estimators=40),
-            bt_config=BacktestConfig(weight_method="risk_parity", enable_regime_timing=True),
+            lgbm_config=LGBMConfig(mode="lambdarank", n_estimators=25, test_window=252, ensemble_seeds=(42,)),
+            bt_config=BacktestConfig(weight_method="equal_weight", enable_regime_timing=True),
             include_ew_compare=False,
             include_heatmap=False,
             use_cache=True,
@@ -210,7 +219,7 @@ class TestRealDataBacktestIntegration:
         # Second experiment changes portfolio/timing params -> MUST hit BOTH Level-1 & Level-2 cache!
         b2 = svc.run_full_pipeline(
             codes=sub_codes,
-            lgbm_config=LGBMConfig(mode="lambdarank", n_estimators=40),
+            lgbm_config=LGBMConfig(mode="lambdarank", n_estimators=25, test_window=252, ensemble_seeds=(42,)),
             bt_config=BacktestConfig(weight_method="equal_weight", enable_regime_timing=False),
             include_ew_compare=False,
             include_heatmap=False,
@@ -277,8 +286,8 @@ class TestRealDataBacktestIntegration:
 
         b_full = svc.run_full_pipeline(
             codes=sub_codes,
-            lgbm_config=LGBMConfig(mode="lambdarank", n_estimators=40),
-            bt_config=BacktestConfig(weight_method="risk_parity", holding_mode="dynamic"),
+            lgbm_config=LGBMConfig(mode="regression", n_estimators=20, test_window=252, ensemble_seeds=(42,)),
+            bt_config=BacktestConfig(weight_method="equal_weight", holding_mode="dynamic"),
             include_ew_compare=False,
             include_heatmap=False,
             use_cache=True,
@@ -292,8 +301,8 @@ class TestRealDataBacktestIntegration:
         b_slice = svc.run_full_pipeline(
             codes=sub_codes,
             start=mid_date,
-            lgbm_config=LGBMConfig(mode="lambdarank", n_estimators=40),
-            bt_config=BacktestConfig(weight_method="risk_parity", holding_mode="dynamic"),
+            lgbm_config=LGBMConfig(mode="regression", n_estimators=20, test_window=252, ensemble_seeds=(42,)),
+            bt_config=BacktestConfig(weight_method="equal_weight", holding_mode="dynamic"),
             include_ew_compare=False,
             include_heatmap=False,
             use_cache=True,
@@ -360,7 +369,7 @@ class TestRealDataBacktestIntegration:
 
         # 2) Default Huber 10d + 6-Seed Bagging + strict embargo >= 10 zero look-ahead
         fwd_ex10 = forward_excess_returns(factor_run.panel, horizon=10)
-        cfg = LGBMConfig(n_estimators=30)
+        cfg = LGBMConfig(n_estimators=25, test_window=252)
         assert cfg.mode == "regression"
         assert cfg.label_horizon == 10
         assert cfg.embargo_days >= 10

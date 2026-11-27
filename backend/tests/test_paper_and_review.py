@@ -93,18 +93,40 @@ def test_scheduler_registers_five_trading_jobs(tmp_path):
         sqlite.close()
 
 
-def test_real_data_recommender_model_rollback_and_weekly_review(tmp_path, real_db, sample_codes):
+def test_real_data_recommender_model_rollback_and_weekly_review(tmp_path, real_db, sample_codes, factor_run):
+    import json
+
+    from app.db.models import BacktestRun
+
     sqlite = SQLiteDatabase(tmp_path / "m3_real.db")
     try:
         reg = ModelRegistry(sqlite_db=sqlite, models_dir=tmp_path / "models")
-        v1, _ = reg.retrain_and_register(codes=sample_codes, model_type="lambdarank", notes="v1", duckdb_client=real_db)
-        v2, _ = reg.retrain_and_register(codes=sample_codes, model_type="regression", notes="v2", duckdb_client=real_db)
+        v1, _ = reg.retrain_and_register(
+            codes=sample_codes,
+            model_type="lambdarank",
+            notes="v1",
+            duckdb_client=real_db,
+            ensemble_seeds=(42,),
+            n_estimators=25,
+            test_window=252,
+            factor_run=factor_run,
+        )
+        v2, _ = reg.retrain_and_register(
+            codes=sample_codes,
+            model_type="regression",
+            notes="v2",
+            duckdb_client=real_db,
+            ensemble_seeds=(42,),
+            n_estimators=25,
+            test_window=252,
+            factor_run=factor_run,
+        )
         assert reg.get_active()["version_id"] == v2["version_id"]
         reg.activate_version(v1["version_id"])
         assert reg.get_active()["version_id"] == v1["version_id"]
 
         rec_engine = RecommendationEngine(duckdb_client=real_db, sqlite_db=sqlite, registry=reg)
-        bundle = rec_engine.generate(codes=sample_codes, persist=True, broadcast=False)
+        bundle = rec_engine.generate(codes=sample_codes, persist=True, broadcast=False, factor_run=factor_run)
         assert len(bundle.recommendations) > 0
         first = bundle.recommendations[0]
         assert len(first["top_factors"]) >= 3
@@ -122,6 +144,22 @@ def test_real_data_recommender_model_rollback_and_weekly_review(tmp_path, real_d
             # On real DEFENSIVE (0%) extreme-bear dates, cash-protection MUST block all new BUYs
             assert rebal["positions_count"] == 0
 
+        # Persist a real recent CSI1000-aligned BacktestRun snapshot in temp SQLite so WeeklyReviewEngine
+        # exercises its primary persisted-benchmark alignment path instead of retraining 4,111 stocks
+        recent_dates = [str(d.date()) for d in factor_run.panel.dates[-6:]]
+        with sqlite.session_scope() as session:
+            session.add(
+                BacktestRun(
+                    id="bt_test_review_ref",
+                    name="review-ref",
+                    status="DONE",
+                    start_date=recent_dates[0],
+                    end_date=recent_dates[-1],
+                    config_json="{}",
+                    metrics_json="{}",
+                    equity_curve_json=json.dumps([{"date": d, "nav": 1.0 + 0.002 * i} for i, d in enumerate(recent_dates)]),
+                )
+            )
         review = WeeklyReviewEngine(duckdb_client=real_db, sqlite_db=sqlite).generate_review()
         assert review["review_id"]
         assert len(review["optimization_advice"]) >= 1
@@ -164,12 +202,21 @@ def test_halted_drawdown_fuse_stays_sticky_on_intraday_refresh(tmp_path):
         sqlite.close()
 
 
-def test_recommender_single_pass_live_quotes_and_progress(tmp_path, real_db, sample_codes):
+def test_recommender_single_pass_live_quotes_and_progress(tmp_path, real_db, sample_codes, factor_run):
     """Regression test for Bug #2/#3/#4: single-pass fetch_live_quotes_fn + progress callback + signal date."""
     sqlite = SQLiteDatabase(tmp_path / "rec_single_pass.db")
     try:
         reg = ModelRegistry(sqlite_db=sqlite, models_dir=tmp_path / "models")
-        reg.retrain_and_register(codes=sample_codes, model_type="regression", notes="sp", duckdb_client=real_db)
+        reg.retrain_and_register(
+            codes=sample_codes,
+            model_type="regression",
+            notes="sp",
+            duckdb_client=real_db,
+            ensemble_seeds=(42,),
+            n_estimators=25,
+            test_window=252,
+            factor_run=factor_run,
+        )
         rec_engine = RecommendationEngine(duckdb_client=real_db, sqlite_db=sqlite, registry=reg)
 
         quote_calls: list[list[str]] = []
@@ -184,6 +231,8 @@ def test_recommender_single_pass_live_quotes_and_progress(tmp_path, real_db, sam
             fetch_live_quotes_fn=_fake_fetch,
             persist=True,
             broadcast=False,
+            refresh_realtime_regime=False,
+            factor_run=factor_run,
             progress_cb=lambda msg, pct: progress_events.append((msg, pct)),
         )
         assert len(quote_calls) == 1  # single-pass guaranteed

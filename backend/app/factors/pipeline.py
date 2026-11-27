@@ -183,7 +183,9 @@ def standardize_panel(
             )
 
     workers = min(8, os.cpu_count() or 4)
-    if n_dates >= 64 and workers > 1:
+    # Only parallelize across threads for wide panels (>=200 stocks) where LAPACK lstsq dominates
+    # and releases the GIL; narrow universes run faster single-threaded without GIL contention.
+    if n_dates >= 64 and len(codes) >= 200 and workers > 1:
         chunk_sz = max(16, (n_dates + workers - 1) // workers)
         ranges = [range(s, min(n_dates, s + chunk_sz)) for s in range(0, n_dates, chunk_sz)]
         with ThreadPoolExecutor(max_workers=workers) as pool:

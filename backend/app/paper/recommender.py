@@ -97,6 +97,8 @@ class RecommendationEngine:
         atr_mult: float = 2.5,
         persist: bool = True,
         broadcast: bool = True,
+        refresh_realtime_regime: bool | None = None,
+        factor_run=None,
         progress_cb: Callable[[str, float], None] | None = None,
     ) -> RecommendationBundle:
         def _emit(stage: str, pct: float) -> None:
@@ -107,8 +109,11 @@ class RecommendationEngine:
         booster, model_meta = self._ensure_active_model(codes=codes)
         feats = model_meta.get("feature_list") or list(ALL_FACTOR_NAMES)
 
-        _emit("正在加载全市场行情面板并计算四维 20 因子与中性化...", 0.16)
-        f_run = FactorEngine(self.db).build(codes=codes, compute_analysis=False)
+        if factor_run is not None:
+            f_run = factor_run
+        else:
+            _emit("正在加载全市场行情面板并计算四维 20 因子与中性化...", 0.16)
+            f_run = FactorEngine(self.db).build(codes=codes, compute_analysis=False)
         panel = f_run.panel
         _emit(f"正在计算 {len(panel.codes)} 只真股技术面防追高共振与大盘择时...", 0.36)
         tech = compute_technical_signals(panel)
@@ -132,7 +137,11 @@ class RecommendationEngine:
             "is_realtime": False,
         }
         # During live 14:40 rebalance / live signal refresh, align target exposure with real-time intraday regime
-        use_live_regime = (live_quotes is not None) or (fetch_live_quotes_fn is not None)
+        use_live_regime = (
+            bool(refresh_realtime_regime)
+            if refresh_realtime_regime is not None
+            else ((live_quotes is not None) or (fetch_live_quotes_fn is not None))
+        )
         if use_live_regime:
             try:
                 from app.strategy.realtime_regime import get_realtime_regime_service

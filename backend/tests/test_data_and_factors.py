@@ -297,3 +297,69 @@ class TestAnalytics:
             assert distinct_fv_days == min(5, len(factor_run.panel.dates))
         finally:
             tmp_db.close()
+
+    def test_parallel_sync_concat_safe_with_corporate_actions_attrs(self, tmp_path):
+        """Regression test: pd.concat across multi-stock bar batches with corporate_actions attrs
+        must never raise `ValueError: The truth value of a DataFrame is ambiguous`."""
+        from datetime import date
+
+        from app.data.sync_service import DataSyncService
+        from app.db.duckdb_client import DuckDBClient
+
+        tmp_db = DuckDBClient(tmp_path / "ca_attrs.duckdb")
+        try:
+            b1 = pd.DataFrame([
+                {"ts_code": "000001.SZ", "trade_date": date(2026, 11, 26), "open": 10.0, "high": 10.2, "low": 9.9, "close": 10.1},
+            ])
+            b1.attrs["corporate_actions"] = pd.DataFrame([
+                {
+                    "ts_code": "000001.SZ",
+                    "ex_date": date(2026, 11, 26),
+                    "bonus_ratio": 0.0,
+                    "transfer_ratio": 0.0,
+                    "cash_div": 0.25,
+                    "rights_ratio": 0.0,
+                    "rights_price": 0.0,
+                    "split_mult": 1.0,
+                    "raw_content": "10派2.5元",
+                    "source": "tencent_fh",
+                }
+            ])
+            b2 = pd.DataFrame([
+                {"ts_code": "600519.SH", "trade_date": date(2026, 11, 26), "open": 1500.0, "high": 1520.0, "low": 1495.0, "close": 1510.0},
+            ])
+            b2.attrs["corporate_actions"] = [
+                {
+                    "ts_code": "600519.SH",
+                    "ex_date": date(2026, 11, 26),
+                    "bonus_ratio": 0.0,
+                    "transfer_ratio": 0.0,
+                    "cash_div": 21.91,
+                    "rights_ratio": 0.0,
+                    "rights_price": 0.0,
+                    "split_mult": 1.0,
+                    "raw_content": "10派219.1元",
+                    "source": "tencent_fh",
+                }
+            ]
+            b3 = pd.DataFrame([
+                {"ts_code": "300750.SZ", "trade_date": date(2026, 11, 26), "open": 250.0, "high": 255.0, "low": 248.0, "close": 252.0},
+            ])
+            b3.attrs["corporate_actions"] = pd.DataFrame()
+
+            ca1 = DataSyncService._extract_corporate_actions(b1)
+            ca2 = DataSyncService._extract_corporate_actions(b2)
+            ca3 = DataSyncService._extract_corporate_actions(b3)
+
+            assert ca1 is not None and len(ca1) == 1
+            assert ca2 is not None and len(ca2) == 1
+            assert ca3 is None
+            assert b1.attrs == {} and b2.attrs == {} and b3.attrs == {}
+
+            combined_bars = pd.concat([b1, b2, b3], ignore_index=True)
+            assert len(combined_bars) == 3
+            combined_ca = pd.concat([ca1, ca2], ignore_index=True)
+            assert tmp_db.upsert_df("corporate_actions", combined_ca) == 2
+            assert int(tmp_db.query_scalar("SELECT COUNT(*) FROM corporate_actions")) == 2
+        finally:
+            tmp_db.close()
