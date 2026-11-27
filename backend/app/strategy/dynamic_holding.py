@@ -186,9 +186,9 @@ def select_dynamic_portfolio(
                 return c
         return None
 
-    # 1) Dynamically evaluate existing holdings (locked & strongest first)
+    # 1) Dynamically evaluate existing holdings (locked & strongest first; deterministic ts_code tie-break)
     active_held = [c for c in held_states if c not in stopped_out]
-    active_held.sort(key=lambda c: (0 if held_states[c].hold_days < eff_min_hold else 1, rank_map.get(c, 9999)))
+    active_held.sort(key=lambda c: (0 if held_states[c].hold_days < eff_min_hold else 1, rank_map.get(c, 9999), c))
 
     for code in active_held:
         st = held_states[code]

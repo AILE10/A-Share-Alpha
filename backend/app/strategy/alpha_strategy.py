@@ -42,7 +42,7 @@ from app.strategy.technical import TechnicalResult, compute_technical_signals
 logger = get_logger(__name__)
 ProgressCallback = Callable[[str, float], None]
 
-_DISK_CACHE_VERSION = "v5"
+_DISK_CACHE_VERSION = "v6"
 
 
 @dataclass

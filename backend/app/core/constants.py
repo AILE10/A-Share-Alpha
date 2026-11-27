@@ -43,6 +43,9 @@ DEFAULT_NON_BULL_BP250_WEIGHT = 0.10       # Champion V2：非强牛期自身 25
 DEFAULT_DRAWDOWN_WARN_PCT = 0.11           # 防牛市锁仓预警线 -11%（保留 -12% 硬熔断红线不变）
 DEFAULT_DRAWDOWN_HALT_PCT = 0.12           # 组合硬熔断红线 -12%（永不放宽）
 DEFAULT_WARN_EXPOSURE_MULT = 0.70          # 预警态温和降仓至 70%（避免 0.50x 半速踏空主升浪）
+DEFAULT_DUAL_RESCUE_MIN_MCAP_QUANTILE = 0.70  # Champion V3：沪深300护盘救援收紧至全市场前30%大盘核心股
+DEFAULT_NEW_ENTRY_MIN_EXPOSURE = 0.60      # Champion V3：>=60%仓位(含60%大盘护盘)新开仓不受add_tol微调阈值阻挡
+DEFAULT_BLOCK_NEW_ENTRY_BULL_HOLD = True   # Champion V3：NEUTRAL 75%高位转弱过渡期仅续持老赢家、不追高开新仓
 
 # 4-Dimension 20 Core Factors Metadata
 FACTOR_DEFINITIONS: list[dict[str, str | int]] = [

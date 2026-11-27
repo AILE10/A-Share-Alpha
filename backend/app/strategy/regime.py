@@ -12,6 +12,7 @@ from app.core.constants import (
     BENCHMARK_CSI300,
     DEFAULT_BULL_MOM_H120_WEIGHT,
     DEFAULT_BULL_MOM_RET20_WEIGHT,
+    DEFAULT_DUAL_RESCUE_MIN_MCAP_QUANTILE,
     DEFAULT_NON_BULL_BP250_WEIGHT,
     DEFAULT_NON_BULL_DL250_WEIGHT,
 )
@@ -35,12 +36,12 @@ class RegimeConfig:
     extreme_breadth: float = 0.18             # 极端冰点空仓宽度门槛
     extreme_drop_5d: float = -0.07            # 中证1000 5日急跌>7% 立即空仓保护
     top_safe_ma20_ratio: float = 0.985        # 金叉顶部安全线（跌破MA20*0.985 提前降仓）
-    # Dual-Index "二八分化" Large-Cap Rescue (D2_Dual_Rescue60_Cap50):
+    # Dual-Index "二八分化" Large-Cap Rescue (Champion V3: D2_Dual_Rescue60_Cap70):
     # When CSI 1000 is weak (<= 30%) & non-crash, while CSI 300 stays bullish (> MA20 & > MA60),
-    # switch to 60% target exposure restricted to top-50% large/mid-cap stocks.
+    # switch to 60% target exposure restricted to top-30% large-cap core stocks.
     dual_rescue_enabled: bool = True
     dual_rescue_exposure: float = 0.60
-    dual_rescue_min_mcap_quantile: float = 0.50
+    dual_rescue_min_mcap_quantile: float = DEFAULT_DUAL_RESCUE_MIN_MCAP_QUANTILE
     dual_rescue_trigger_max_exp: float = 0.30
     dual_csi300_crash_5d: float = -0.05
 

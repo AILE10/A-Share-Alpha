@@ -15,6 +15,7 @@ from app.api.ws_manager import ws_manager
 from app.core.calendar import today_cn
 from app.core.constants import (
     ALL_FACTOR_NAMES,
+    DEFAULT_BLOCK_NEW_ENTRY_BULL_HOLD,
     DEFAULT_BULL_MOM_H120_WEIGHT,
     DEFAULT_BULL_MOM_RET20_WEIGHT,
     DEFAULT_MIN_PRICE,
@@ -398,9 +399,17 @@ class RecommendationEngine:
                         weak_rank_streak=streak_by_code.get(code, 0),
                     )
 
-            # Live post-stop cooldown in weak/neutral regimes (prevents catching falling knives)
-            allow_new_entries = True
-            if regime_label != "OFFENSIVE" and dyn_cfg.stop_cooldown_days > 0:
+            # Live post-stop cooldown & Champion V3 (E9) NEUTRAL 75% bull-hold rollover protection
+            # (keep holding existing winners without chasing brand-new entries when bull momentum cools)
+            style_mode_live = str(regime_info.get("style_mode", "ALL_CAP"))
+            in_bull_hold_rollover = (
+                DEFAULT_BLOCK_NEW_ENTRY_BULL_HOLD
+                and regime_label == "NEUTRAL"
+                and style_mode_live != "LARGE_CAP_RESCUE"
+                and abs(target_exp - 0.75) < 0.02
+            )
+            allow_new_entries = not in_bull_hold_rollover
+            if allow_new_entries and regime_label != "OFFENSIVE" and dyn_cfg.stop_cooldown_days > 0:
                 with self.sqlite.session_scope() as session:
                     recent_stop = (
                         session.query(PaperOrder)

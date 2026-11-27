@@ -458,12 +458,12 @@ class TestRealDataBacktestIntegration:
         assert classify_regime_point(6200, 6500, 6800, 0.22, -0.03, cfg) == ("DEFENSIVE", 0.0)  # deep bear 0% cash
         assert classify_regime_point(6200, 6500, 6800, 0.30, -0.02, cfg) == ("DEFENSIVE", 0.10)  # regular bear 10%
 
-        # Dual-Index "二八分化" Large-Cap Rescue (D2_Dual_Rescue60_Cap50) verification
-        # 1) CSI1000 weak (10% / 30%) & non-crash, while CSI300 bullish (>MA20 & >MA60) -> 60% LARGE_CAP_RESCUE (>=50% mcap)
+        # Dual-Index "二八分化" Large-Cap Rescue (Champion V3: D2_Dual_Rescue60_Cap70) verification
+        # 1) CSI1000 weak (10% / 30%) & non-crash, while CSI300 bullish (>MA20 & >MA60) -> 60% LARGE_CAP_RESCUE (>=70% top-30% core)
         assert classify_regime_detail(
             6200, 6500, 6800, 0.30, -0.02, cfg,
             csi300_close=4100, csi300_ma20=4000, csi300_ma60=3900, csi300_ret_5d=0.01,
-        ) == ("NEUTRAL", 0.60, "LARGE_CAP_RESCUE", 0.50)
+        ) == ("NEUTRAL", 0.60, "LARGE_CAP_RESCUE", 0.70)
         # 2) Systemic crash veto: CSI300 5d drop <= -5% OR breadth < 18% -> rescue blocked, stays 0% ALL_CAP
         assert classify_regime_detail(
             6200, 6500, 6800, 0.30, -0.02, cfg,
@@ -671,3 +671,60 @@ class TestRealDataBacktestIntegration:
         nav_d8 = float(res.daily_nav.iloc[8])
         assert nav_d5 > nav_d4, f"Phantom loss on 3-for-1 split day: d4={nav_d4}, d5={nav_d5}"
         assert nav_d8 == pytest.approx(nav_d5, abs=5.0), f"Phantom loss on cash dividend day: d5={nav_d5}, d8={nav_d8}"
+
+    def test_champion_v3_rescue60_new_entry_neutral75_hold_only_and_deterministic_sort(self, factor_run):
+        """Verify Champion V3 upgrades:
+        1) E6: 60% LARGE_CAP_RESCUE (N=15 -> tw=4.0% == add_tol) executes brand-new entries cleanly.
+        2) E9: NEUTRAL 75% bull-hold rollover blocks chasing brand-new entries while keeping existing holds.
+        3) Deterministic ts_code tie-breaker in select_dynamic_portfolio when truncating tied rank=9999 holdings.
+        """
+        from app.strategy.dynamic_holding import DynamicHoldingConfig, HeldPositionState, select_dynamic_portfolio
+
+        # 1) Deterministic truncation test across reversed dict insertion orders
+        codes = [f"0000{i:02d}.SZ" for i in range(1, 20)]
+        scores = pd.Series(np.linspace(1.0, 0.1, 5), index=codes[:5])
+        tech = pd.Series(True, index=codes)
+        elig = pd.Series([True] * 5 + [False] * 14, index=codes)
+        inds = pd.Series([f"行业{i % 8}" for i in range(len(codes))], index=codes)
+        pcfg = PortfolioConfig(target_holdings=5, top_candidates=10, buffer_rank=15)
+        dcfg = DynamicHoldingConfig(min_hold_days=10)
+        held_fwd = {c: HeldPositionState(c, hold_days=2, avg_cost=10.0, current_price=10.0, highest_price=10.0) for c in codes[5:13]}
+        held_rev = {c: held_fwd[c] for c in reversed(list(held_fwd.keys()))}
+        r_fwd = select_dynamic_portfolio(scores, tech, elig, held_fwd, set(), pcfg, dcfg, inds, regime="NEUTRAL", target_exposure=0.60, allow_new_entries=True)
+        r_rev = select_dynamic_portfolio(scores, tech, elig, held_rev, set(), pcfg, dcfg, inds, regime="NEUTRAL", target_exposure=0.60, allow_new_entries=True)
+        assert r_fwd.selected == r_rev.selected == sorted(held_fwd.keys())[:5]
+
+        # 2) E6 & E9 on real DuckDB slice
+        panel = factor_run.panel
+        elig_df = factor_run.universe.eligible
+        tech_r = compute_technical_signals(panel)
+        scores_df = pd.DataFrame(
+            np.tile(np.linspace(2.0, -2.0, len(panel.codes)), (len(panel.dates), 1)),
+            index=panel.dates,
+            columns=panel.codes,
+        )
+        start_d = panel.dates[-25]
+
+        # E6: Pure 60% LARGE_CAP_RESCUE with N=15 (tw=4.0% <= add_tol=4.0%) MUST buy brand-new stocks!
+        reg_rescue = pd.DataFrame(
+            {"regime": "NEUTRAL", "target_exposure": 0.60, "style_mode": "LARGE_CAP_RESCUE", "min_mcap_quantile": 0.70},
+            index=panel.dates,
+        )
+        bt_rescue = AShareBacktestEngine(
+            BacktestConfig(target_holdings=15, weight_method="equal_weight", enable_technical_filter=False, bull_mom_h120_weight=0.0, non_bull_dl250_weight=0.0, non_bull_bp250_weight=0.0)
+        ).run(panel, scores_df, elig_df, tech_r, reg_rescue, start_date=start_d)
+        assert any(t["side"] == "BUY" for t in bt_rescue.trades), "Champion V3 E6 failed: 60% LARGE_CAP_RESCUE blocked new entries!"
+
+        # E9: Pure NEUTRAL 75% (from empty cash) MUST NOT chase brand-new entries when block_new_entry_bull_hold=True
+        reg_n75 = pd.DataFrame(
+            {"regime": "NEUTRAL", "target_exposure": 0.75, "style_mode": "ALL_CAP", "min_mcap_quantile": 0.0},
+            index=panel.dates,
+        )
+        bt_n75_block = AShareBacktestEngine(
+            BacktestConfig(target_holdings=15, weight_method="equal_weight", block_new_entry_bull_hold=True, enable_technical_filter=False)
+        ).run(panel, scores_df, elig_df, tech_r, reg_n75, start_date=start_d)
+        assert len([t for t in bt_n75_block.trades if t["side"] == "BUY"]) == 0
+        bt_n75_allow = AShareBacktestEngine(
+            BacktestConfig(target_holdings=15, weight_method="equal_weight", block_new_entry_bull_hold=False, enable_technical_filter=False)
+        ).run(panel, scores_df, elig_df, tech_r, reg_n75, start_date=start_d)
+        assert len([t for t in bt_n75_allow.trades if t["side"] == "BUY"]) > 0

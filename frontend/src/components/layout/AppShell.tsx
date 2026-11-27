@@ -200,7 +200,7 @@ export const AppShell: React.FC<Props> = ({ children }) => {
                             ? ` (${regimeDetail.csi300_pct_chg >= 0 ? '+' : ''}${Number(regimeDetail.csi300_pct_chg).toFixed(2)}%)`
                             : ''}
                           {' · '}
-                          {regimeDetail.style_mode === 'LARGE_CAP_RESCUE' ? '二八分化 → 切前50%大中盘' : '全市场选股'}
+                          {regimeDetail.style_mode === 'LARGE_CAP_RESCUE' ? '二八分化 → 切前30%大盘核心' : '全市场选股'}
                         </div>
                       )}
                       <div>

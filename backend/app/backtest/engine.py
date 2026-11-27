@@ -31,12 +31,14 @@ from app.broker.drawdown_fuse import DrawdownFuseConfig, DrawdownFuseState, step
 from app.core.constants import (
     BENCHMARK_CSI1000,
     BENCHMARK_CSI300,
+    DEFAULT_BLOCK_NEW_ENTRY_BULL_HOLD,
     DEFAULT_BUFFER_RANK,
     DEFAULT_BULL_MOM_H120_WEIGHT,
     DEFAULT_BULL_MOM_RET20_WEIGHT,
     DEFAULT_DRAWDOWN_HALT_PCT,
     DEFAULT_DRAWDOWN_WARN_PCT,
     DEFAULT_MIN_PRICE,
+    DEFAULT_NEW_ENTRY_MIN_EXPOSURE,
     DEFAULT_NON_BULL_BP250_WEIGHT,
     DEFAULT_NON_BULL_DL250_WEIGHT,
     DEFAULT_REBALANCE_DAYS,
@@ -100,6 +102,8 @@ class BacktestConfig:
     non_bull_dl250_weight: float = DEFAULT_NON_BULL_DL250_WEIGHT  # 非强牛期 250 日低位距离安全垫(-z)
     non_bull_bp250_weight: float = DEFAULT_NON_BULL_BP250_WEIGHT  # 非强牛期 250 日 PB 估值低位分位(+z)
     min_buy_price: float = DEFAULT_MIN_PRICE  # 选股执行层防面值退市硬底线（不扰动因子标准化与训练样本）
+    new_entry_min_exposure: float = DEFAULT_NEW_ENTRY_MIN_EXPOSURE  # Champion V3：>=60%仓位(含护盘救援)新开仓不受add_tol阻挡
+    block_new_entry_bull_hold: bool = DEFAULT_BLOCK_NEW_ENTRY_BULL_HOLD  # Champion V3：NEUTRAL 75%高位转弱期仅续持不追高开新仓
     cash_yield_rate: float = 0.0         # 可选闲置现金货币ETF年化收益率（默认0%=纯股票Alpha，可设0.015/0.018）
     price_mode: Literal["open", "close"] = "open"
 
@@ -703,7 +707,7 @@ class AShareBacktestEngine:
                             c_code = codes_list[int(ci)]
                             day_ranks[c_code] = rk_i
                             score_z_sub[c_code] = float((s_row[ci] - s_mu) / s_sd)
-                        for code in held_set:
+                        for code in sorted(held_set):
                             ci = code_to_col[code]
                             rk = int(rank_by_col[ci])
                             if rk < 9999:
@@ -712,7 +716,7 @@ class AShareBacktestEngine:
 
                     # Update consecutive weak-rank streak for every held position
                     held_states: dict[str, HeldPositionState] = {}
-                    for code in held_set:
+                    for code in sorted(held_set):
                         pos = positions[code]
                         ci = code_to_col[code]
                         rk = int(rank_by_col[ci])
@@ -735,7 +739,15 @@ class AShareBacktestEngine:
                             weak_rank_streak=pos.weak_rank_streak,
                         )
                     eff_cooldown = 0 if regime_label == "OFFENSIVE" else dyn_cfg.stop_cooldown_days
-                    allow_entries = (day_idx - last_stop_day_idx) >= eff_cooldown
+                    # Champion V3 (E9): In NEUTRAL 75% bull-hold topping transition, keep holding
+                    # strong winners without chasing brand-new entries into a cooling market.
+                    in_bull_hold_rollover = (
+                        cfg.block_new_entry_bull_hold
+                        and regime_label == "NEUTRAL"
+                        and style_mode != "LARGE_CAP_RESCUE"
+                        and abs(target_exposure - 0.75) < 0.02
+                    )
+                    allow_entries = ((day_idx - last_stop_day_idx) >= eff_cooldown) and (not in_bull_hold_rollover)
                     tech_sub = {c: bool(day_tech_row[code_to_col[c]]) for c in top_k_codes}
                     dyn_res = select_dynamic_portfolio(
                         scores=empty_series,
@@ -819,7 +831,15 @@ class AShareBacktestEngine:
                     px_v = close_np[day_idx, code_to_col[code]]
                     px = float(px_v) if np.isfinite(px_v) else 0.0
                     cur_w = (pos.total_shares * px) / max(equity, 1.0) if (pos and px > 0) else 0.0
-                    if tw - cur_w > add_tol:
+                    # Champion V3 (E6): add_tol guards micro top-ups on existing holdings; brand-new
+                    # entries in >= new_entry_min_exposure regimes (including 60% LARGE_CAP_RESCUE
+                    # where tw=4.0% == add_tol) execute cleanly to match live paper service parity.
+                    is_new_entry = (
+                        (pos is None)
+                        and (target_exposure >= cfg.new_entry_min_exposure - 1e-6)
+                        and (tw > 1e-4)
+                    )
+                    if is_new_entry or (tw - cur_w > add_tol):
                         rk = rank_map.get(code, 0)
                         reason = buy_reason_map.get(code, f"定期调仓入选(排名#{rk},目标{tw:.1%})")
                         pending_buys[code] = (tw, reason)
@@ -851,6 +871,8 @@ class AShareBacktestEngine:
         metrics["non_bull_bp250_weight"] = float(cfg.non_bull_bp250_weight)
         metrics["drawdown_warn_pct"] = float(cfg.drawdown_warn_pct)
         metrics["warn_exposure_mult"] = float(cfg.warn_exposure_mult)
+        metrics["new_entry_min_exposure"] = float(cfg.new_entry_min_exposure)
+        metrics["block_new_entry_bull_hold"] = bool(cfg.block_new_entry_bull_hold)
 
         # Normalize curves to 1.0000 for charting
         norm_strat = nav_series / nav_series.iloc[0]

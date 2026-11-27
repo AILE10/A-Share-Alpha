@@ -35,9 +35,9 @@ interface RunningJobState {
 
 const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
   {
-    label: '全周期双态冠军V2 · N=15等权(推荐)',
+    label: '全周期冠军V3 · N=15等权+前30%护盘(推荐)',
     values: {
-      name: '全周期双态冠军V2-N15等权+牛市突破+非牛市250日低位锚定',
+      name: '全周期冠军V3-N15等权+前30%大盘护盘+N75防追高',
       start_date: '',
       end_date: '',
       model_mode: 'regression',
@@ -60,15 +60,48 @@ const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
       bull_mom_ret20_weight: 0,
       non_bull_dl250_weight: 0.1,
       non_bull_bp250_weight: 0.1,
+      cash_yield_rate: 0,
       enable_regime_timing: true,
       enable_technical_filter: true,
       include_heatmap: false,
     },
   },
   {
-    label: '极低回撤版 · N=15风险平价(MDD~10%)',
+    label: '冠军V3 + 1.5%闲置货基收益(实盘口径)',
     values: {
-      name: '极低回撤版V2-N15风险平价+双态锚定',
+      name: '全周期冠军V3-N15等权+1.5%闲置货基收益',
+      start_date: '',
+      end_date: '',
+      model_mode: 'regression',
+      ensemble_seeds_count: 6,
+      weight_method: 'equal_weight',
+      holding_mode: 'dynamic',
+      min_hold_days: 10,
+      buffer_rank: 45,
+      deep_exit_rank: 150,
+      exit_confirm_days: 3,
+      swap_score_gap: 0.7,
+      profit_ride_pct: 0.1,
+      profit_protect_pct: 0.15,
+      stop_cooldown_days: 5,
+      target_holdings: 15,
+      hard_stop_pct: 0.08,
+      atr_stop_mult: 2.5,
+      slippage_bps: 10,
+      bull_mom_h120_weight: 0.25,
+      bull_mom_ret20_weight: 0,
+      non_bull_dl250_weight: 0.1,
+      non_bull_bp250_weight: 0.1,
+      cash_yield_rate: 0.015,
+      enable_regime_timing: true,
+      enable_technical_filter: true,
+      include_heatmap: false,
+    },
+  },
+  {
+    label: '极低回撤版V3 · N=15风险平价',
+    values: {
+      name: '极低回撤版V3-N15风险平价+双态锚定',
       start_date: '',
       end_date: '',
       model_mode: 'regression',
@@ -148,7 +181,7 @@ const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
   {
     label: '压力:20bps滑点',
     values: {
-      name: '压力测试-冠军V2(20bps双倍滑点)',
+      name: '压力测试-冠军V3(20bps双倍滑点)',
       holding_mode: 'dynamic',
       weight_method: 'equal_weight',
       target_holdings: 15,
@@ -571,7 +604,7 @@ export const BacktestCenterPage: React.FC = () => {
             layout="vertical"
             size="small"
             initialValues={{
-              name: '全周期双态冠军V2-N15等权+双态锚定(2021~2026完整牛熊)',
+              name: '全周期冠军V3-N15等权+前30%大盘护盘+N75防追高(2021~2026)',
               start_date: '',
               end_date: '',
               model_mode: 'regression',
@@ -603,7 +636,7 @@ export const BacktestCenterPage: React.FC = () => {
             }}
           >
             <Form.Item name="name" label="实验名称（便于多轮对比）" rules={[{ required: true, message: '请输入实验名称' }]}>
-              <Input placeholder="例如：全周期双态冠军V2(2021~2026)" />
+              <Input placeholder="例如：全周期冠军V3(2021~2026)" />
             </Form.Item>
             <div className="mb-2">
               <div className="text-[11px] text-slate-400 mb-1">快捷回测区间：</div>
