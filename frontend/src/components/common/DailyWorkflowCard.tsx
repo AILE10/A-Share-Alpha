@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Button, Progress, Tag, Tooltip, message } from 'antd';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Button, Progress, Spin, Tag, Tooltip, message } from 'antd';
 import {
   ArrowRightOutlined,
   CheckCircleFilled,
@@ -62,27 +62,46 @@ export const DailyWorkflowCard: React.FC<DailyWorkflowCardProps> = ({
   onStepCompleted,
 }) => {
   const [wf, setWf] = useState<DailyWorkflowState | null>(initialWorkflow);
+  const [loadingInitial, setLoadingInitial] = useState<boolean>(!initialWorkflow);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const fetchWorkflow = async (showSpinner = false) => {
+  const fetchWorkflow = useCallback(async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true);
     try {
       const res = await api.getDailyWorkflow();
-      setWf(res);
-    } catch {
-      // ignore transient error
+      if (res && Array.isArray(res.steps) && res.steps.length > 0) {
+        setWf(res);
+        setLoadError(null);
+      } else {
+        setLoadError('后端暂未返回每日流程步骤');
+      }
+    } catch (e: any) {
+      setLoadError(e?.response?.data?.detail || '流程状态请求失败，可能后端正在重启或网络抖动');
     } finally {
+      setLoadingInitial(false);
       if (showSpinner) setRefreshing(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    if (initialWorkflow) {
+    if (initialWorkflow && Array.isArray(initialWorkflow.steps) && initialWorkflow.steps.length > 0) {
       setWf(initialWorkflow);
+      setLoadError(null);
+      setLoadingInitial(false);
     } else {
       fetchWorkflow(false);
     }
-  }, [initialWorkflow]);
+  }, [initialWorkflow, fetchWorkflow]);
+
+  // Auto-retry if initial workflow load failed transiently (e.g. backend restarting)
+  useEffect(() => {
+    if (wf || !loadError) return;
+    const timer = window.setTimeout(() => {
+      fetchWorkflow(false);
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [wf, loadError, fetchWorkflow]);
 
   const wfTask = useAsyncTask({
     kinds: STEP_KINDS,
@@ -99,7 +118,7 @@ export const DailyWorkflowCard: React.FC<DailyWorkflowCardProps> = ({
   });
 
   // Instant WebSocket updates when scheduler or manual triggers update any workflow node
-  useAlphaWebSocket((evt) => {
+  const { connected: wsConnected } = useAlphaWebSocket((evt) => {
     if (evt.channel === 'workflow_step' && evt.payload?.step_key) {
       const p = evt.payload;
       setWf((prev) => {
@@ -124,6 +143,12 @@ export const DailyWorkflowCard: React.FC<DailyWorkflowCardProps> = ({
     }
   });
 
+  useEffect(() => {
+    if (wsConnected && !wf) {
+      fetchWorkflow(false);
+    }
+  }, [wsConnected, wf, fetchWorkflow]);
+
   const handleRunStep = async (step: DailyWorkflowStep) => {
     try {
       if (step.step_key === 'pre_market_unlock') {
@@ -143,8 +168,39 @@ export const DailyWorkflowCard: React.FC<DailyWorkflowCardProps> = ({
     }
   };
 
+  if (loadingInitial && !wf) {
+    return (
+      <div className="quant-card p-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 text-xs text-slate-300">
+          <Spin size="small" />
+          <span>正在加载每日固定交易流程（自动调度 + 实时状态）...</span>
+        </div>
+      </div>
+    );
+  }
+
   if (!wf || !wf.steps?.length) {
-    return null;
+    return (
+      <div className="quant-card p-4 border border-amber-500/40 flex flex-wrap items-center justify-between gap-3">
+        <div className="space-y-0.5">
+          <div className="text-sm font-semibold text-slate-100">
+            每日固定交易流程（自动调度 + 实时状态）
+          </div>
+          <div className="text-xs text-amber-300/90">
+            {loadError || '流程状态暂未加载，系统正在自动重试...'}
+          </div>
+        </div>
+        <Button
+          size="small"
+          type="primary"
+          icon={<ReloadOutlined spin={refreshing} />}
+          loading={refreshing}
+          onClick={() => fetchWorkflow(true)}
+        >
+          立即重试加载
+        </Button>
+      </div>
+    );
   }
 
   const activeTask = wfTask.activeTask;
