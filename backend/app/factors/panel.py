@@ -127,6 +127,53 @@ def _pivot(df: pd.DataFrame, col: str, dates: pd.DatetimeIndex, codes: list[str]
     return wide.reindex(index=dates, columns=codes)
 
 
+def _to_float64(series: pd.Series) -> np.ndarray:
+    try:
+        return series.to_numpy(dtype=np.float64, na_value=np.nan)
+    except (TypeError, ValueError):
+        return pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
+
+
+def _scatter_columns(
+    df: pd.DataFrame,
+    date_col: str,
+    code_col: str,
+    val_cols: list[str],
+    dates: pd.DatetimeIndex,
+    code_to_col: dict[str, int],
+    codes_sorted: list[str],
+    fill_values: dict[str, float] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Single-pass NumPy coordinate scatter replacing repeated pandas pivot_table calls (~10x faster)."""
+    n_dates, n_codes = len(dates), len(codes_sorted)
+    fills = fill_values or {}
+    if df.empty:
+        return {
+            col: pd.DataFrame(np.full((n_dates, n_codes), fills.get(col, np.nan), dtype=np.float64), index=dates, columns=codes_sorted)
+            for col in val_cols
+        }
+
+    dt_series = pd.to_datetime(df[date_col])
+    ri = dates.get_indexer(dt_series)
+    ci = df[code_col].map(code_to_col).fillna(-1).to_numpy(dtype=np.intp)
+    valid = (ri >= 0) & (ci >= 0)
+    ri_v = ri[valid]
+    ci_v = ci[valid]
+
+    out: dict[str, pd.DataFrame] = {}
+    for col in val_cols:
+        fv = fills.get(col, np.nan)
+        mat = np.full((n_dates, n_codes), fv, dtype=np.float64)
+        vals = _to_float64(df[col])[valid]
+        if np.isnan(fv):
+            mat[ri_v, ci_v] = vals
+        else:
+            ok = ~np.isnan(vals)
+            mat[ri_v[ok], ci_v[ok]] = vals[ok]
+        out[col] = pd.DataFrame(mat, index=dates, columns=codes_sorted)
+    return out
+
+
 def load_pit_fundamentals(db: DuckDBClient, codes: list[str], start: date, end: date) -> pd.DataFrame:
     """Point-in-time fundamentals via DuckDB ASOF JOIN on the REAL announcement date.
 
@@ -190,14 +237,30 @@ def load_market_panel(
             day_counts = day_counts.iloc[:-1]
     dates = pd.DatetimeIndex(sorted(bars["trade_date"].unique()))
     codes_sorted = sorted(bars["ts_code"].unique().tolist())
+    code_to_col = {c: i for i, c in enumerate(codes_sorted)}
+    n_dates, n_codes = len(dates), len(codes_sorted)
+
+    # Single-pass NumPy coordinate scatter (replaces 16 separate pandas.pivot calls over 6M+ rows)
+    row_idx = dates.get_indexer(bars["trade_date"])
+    col_idx = bars["ts_code"].map(code_to_col).to_numpy(dtype=np.intp)
 
     num_cols = ["open", "high", "low", "close", "pre_close", "volume", "amount", "turnover_rate",
                 "adj_factor", "pe_ttm", "pb", "total_mv", "limit_up", "limit_down"]
-    piv = {c: _pivot(bars, c, dates, codes_sorted).astype(float) for c in num_cols}
-    is_st = _pivot(bars, "is_st", dates, codes_sorted).astype("boolean").fillna(False).astype(bool)
-    is_susp = _pivot(bars, "is_suspended", dates, codes_sorted)
+    piv: dict[str, pd.DataFrame] = {}
+    for c in num_cols:
+        mat = np.full((n_dates, n_codes), np.nan, dtype=np.float64)
+        mat[row_idx, col_idx] = _to_float64(bars[c])
+        piv[c] = pd.DataFrame(mat, index=dates, columns=codes_sorted)
+
+    st_mat = np.zeros((n_dates, n_codes), dtype=bool)
+    st_mat[row_idx, col_idx] = bars["is_st"].astype("boolean").fillna(False).to_numpy(dtype=bool)
+    is_st = pd.DataFrame(st_mat, index=dates, columns=codes_sorted)
+
     # Missing bar on an open day (stock not trading / not yet listed) is treated as suspended
-    is_susp = is_susp.astype("boolean").fillna(True).astype(bool)
+    susp_mat = np.ones((n_dates, n_codes), dtype=bool)
+    susp_mat[row_idx, col_idx] = bars["is_suspended"].astype("boolean").fillna(True).to_numpy(dtype=bool)
+    is_susp = pd.DataFrame(susp_mat, index=dates, columns=codes_sorted)
+
     piv["adj_factor"] = piv["adj_factor"].ffill().bfill().fillna(1.0)
 
     idx_close: dict[str, pd.Series] = {}
@@ -218,15 +281,16 @@ def load_market_panel(
     )
     cf_wide = None
     if not cf.empty:
-        cf["trade_date"] = pd.to_datetime(cf["trade_date"])
-        cf_wide = cf.pivot_table(index="trade_date", columns="ts_code", values="main_net_inflow_ratio").reindex(index=dates, columns=codes_sorted)
+        cf_wide = _scatter_columns(
+            cf, "trade_date", "ts_code", ["main_net_inflow_ratio"], dates, code_to_col, codes_sorted
+        )["main_net_inflow_ratio"]
 
     fund = load_pit_fundamentals(db, codes_sorted, dates[0].date(), dates[-1].date())
     fundamentals: dict[str, pd.DataFrame] = {}
     if not fund.empty:
-        fund["trade_date"] = pd.to_datetime(fund["trade_date"])
-        for col in ("roe_ttm", "np_yoy_q"):
-            fundamentals[col] = fund.pivot_table(index="trade_date", columns="ts_code", values=col, dropna=False).reindex(index=dates, columns=codes_sorted)
+        fundamentals = _scatter_columns(
+            fund, "trade_date", "ts_code", ["roe_ttm", "np_yoy_q"], dates, code_to_col, codes_sorted
+        )
 
     split_mult_df: pd.DataFrame | None = None
     cash_div_df: pd.DataFrame | None = None
@@ -239,17 +303,18 @@ def load_market_panel(
             [dates[0].date(), dates[-1].date()],
         )
         if not ca.empty:
-            ca["ex_date"] = pd.to_datetime(ca["ex_date"])
-            split_mult_df = (
-                ca.pivot_table(index="ex_date", columns="ts_code", values="split_mult", aggfunc="last")
-                .reindex(index=dates, columns=codes_sorted)
-                .fillna(1.0)
+            ca_piv = _scatter_columns(
+                ca,
+                "ex_date",
+                "ts_code",
+                ["split_mult", "cash_div"],
+                dates,
+                code_to_col,
+                codes_sorted,
+                fill_values={"split_mult": 1.0, "cash_div": 0.0},
             )
-            cash_div_df = (
-                ca.pivot_table(index="ex_date", columns="ts_code", values="cash_div", aggfunc="last")
-                .reindex(index=dates, columns=codes_sorted)
-                .fillna(0.0)
-            )
+            split_mult_df = ca_piv["split_mult"]
+            cash_div_df = ca_piv["cash_div"]
     except Exception:  # noqa: BLE001
         # Backward compatibility for pre-existing test DBs without corporate_actions populated
         pass
@@ -268,23 +333,35 @@ def load_market_panel(
 
 
 def trading_days_since_listing(panel: MarketPanel, all_trade_dates: pd.DatetimeIndex | None = None) -> pd.DataFrame:
-    """Number of exchange trading days since IPO for each (date, code)."""
+    """Number of exchange trading days since IPO for each (date, code), fully vectorized."""
     cal = all_trade_dates if all_trade_dates is not None else panel.dates
     cal = pd.DatetimeIndex(sorted(cal))
-    out = pd.DataFrame(index=panel.dates, columns=panel.codes, dtype=float)
-    list_dates = {}
+    n_dates, n_codes = len(panel.dates), len(panel.codes)
+    mat = np.empty((n_dates, n_codes), dtype=np.float64)
+
+    list_dates: dict[str, pd.Timestamp] = {}
     if not panel.basic.empty:
         list_dates = dict(zip(panel.basic["ts_code"], pd.to_datetime(panel.basic["list_date"])))
-    date_pos = cal.searchsorted(panel.dates, side="right")
-    for code in panel.codes:
+    date_pos = cal.searchsorted(panel.dates, side="right").astype(np.float64)
+
+    known_cols: list[int] = []
+    known_lpos: list[int] = []
+    unknown_cols: list[int] = []
+    for idx, code in enumerate(panel.codes):
         ld = list_dates.get(code)
         if ld is None or pd.isna(ld):
-            # unknown IPO date: count available bars as conservative lower bound
-            out[code] = (~panel.is_suspended[code]).cumsum().to_numpy(dtype=float) + 0.0
-            continue
-        lpos = cal.searchsorted(ld, side="left")
-        out[code] = (date_pos - lpos).astype(float)
-    return out
+            unknown_cols.append(idx)
+        else:
+            known_cols.append(idx)
+            known_lpos.append(int(cal.searchsorted(ld, side="left")))
+
+    if known_cols:
+        lpos_arr = np.asarray(known_lpos, dtype=np.float64)
+        mat[:, known_cols] = date_pos[:, None] - lpos_arr[None, :]
+    if unknown_cols:
+        susp_np = panel.is_suspended.to_numpy(dtype=bool)
+        mat[:, unknown_cols] = (~susp_np[:, unknown_cols]).cumsum(axis=0, dtype=np.float64)
+    return pd.DataFrame(mat, index=panel.dates, columns=panel.codes)
 
 
 def np_nan_like(df: pd.DataFrame) -> pd.DataFrame:

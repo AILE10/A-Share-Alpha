@@ -315,6 +315,28 @@ class AShareBacktestEngine:
                 limit_down=(float(ld_v) if np.isfinite(ld_v) and ld_v > 0 else None),
             )
 
+        # Pre-extract aligned regime columns as plain arrays (eliminating 1,381 pandas .loc lookups)
+        reg_aligned = regime_df.reindex(sim_dates)
+        reg_labels_arr = reg_aligned["regime"].fillna("NEUTRAL").astype(str).tolist() if "regime" in reg_aligned.columns else ["NEUTRAL"] * len(sim_dates)
+        reg_exp_arr = (
+            reg_aligned["target_exposure"].fillna(0.90).to_numpy(dtype=float)
+            if (cfg.enable_regime_timing and "target_exposure" in reg_aligned.columns)
+            else np.full(len(sim_dates), 0.90, dtype=float)
+        )
+        reg_style_arr = (
+            reg_aligned["style_mode"].fillna("ALL_CAP").astype(str).tolist()
+            if (cfg.enable_regime_timing and "style_mode" in reg_aligned.columns)
+            else ["ALL_CAP"] * len(sim_dates)
+        )
+        reg_mcap_q_arr = (
+            reg_aligned["min_mcap_quantile"].fillna(0.0).to_numpy(dtype=float)
+            if (cfg.enable_regime_timing and "min_mcap_quantile" in reg_aligned.columns)
+            else np.zeros(len(sim_dates), dtype=float)
+        )
+        names_dict = names.to_dict()
+        n_codes_total = len(codes_list)
+        empty_series = pd.Series(dtype=float)
+
         for day_idx, dt in enumerate(sim_dates):
             dt_str = str(dt.date())
 
@@ -421,7 +443,7 @@ class AShareBacktestEngine:
                     trades.append({
                         "trade_date": dt_str,
                         "ts_code": code,
-                        "name": str(names.get(code, "")),
+                        "name": str(names_dict.get(code, "")),
                         "side": "SELL",
                         "qty": fill.filled_qty,
                         "price": fill.exec_price,
@@ -511,7 +533,7 @@ class AShareBacktestEngine:
                         trades.append({
                             "trade_date": dt_str,
                             "ts_code": code,
-                            "name": str(names.get(code, "")),
+                            "name": str(names_dict.get(code, "")),
                             "side": "BUY",
                             "qty": fill.filled_qty,
                             "price": fill.exec_price,
@@ -571,8 +593,7 @@ class AShareBacktestEngine:
                     stopped_today.add(code)
 
             equity = cash + mv
-            reg_row = regime_df.loc[dt] if dt in regime_df.index else None
-            regime_label = str(reg_row["regime"]) if reg_row is not None else "NEUTRAL"
+            regime_label = reg_labels_arr[day_idx]
 
             fuse_step = step_drawdown_fuse(fuse_state_obj, equity, regime_label, fuse_cfg)
             fuse_state = fuse_step.status
@@ -580,18 +601,9 @@ class AShareBacktestEngine:
                 for code, pos in positions.items():
                     pending_sells[code] = (pos.total_shares, f"组合回撤熔断({fuse_step.control_drawdown:.1%})")
 
-            target_exposure = float(reg_row["target_exposure"]) if (reg_row is not None and cfg.enable_regime_timing) else 0.90
-            target_exposure *= fuse_step.exposure_mult
-            style_mode = (
-                str(reg_row["style_mode"])
-                if (reg_row is not None and cfg.enable_regime_timing and "style_mode" in reg_row.index and pd.notna(reg_row["style_mode"]))
-                else "ALL_CAP"
-            )
-            min_mcap_q = (
-                float(reg_row["min_mcap_quantile"])
-                if (reg_row is not None and cfg.enable_regime_timing and "min_mcap_quantile" in reg_row.index and pd.notna(reg_row["min_mcap_quantile"]))
-                else 0.0
-            )
+            target_exposure = float(reg_exp_arr[day_idx]) * fuse_step.exposure_mult
+            style_mode = reg_style_arr[day_idx]
+            min_mcap_q = float(reg_mcap_q_arr[day_idx])
 
             nav_records.append({
                 "date": dt_str,
@@ -668,27 +680,42 @@ class AShareBacktestEngine:
                 day_tech_row = tech_pass_np[day_idx]
                 held_set = set(positions.keys()) - set(pending_sells.keys())
 
-                # Fast NumPy filtering & descending sort ONCE per day (zero redundant reindexing!)
+                # Zero-pandas NumPy ranking & z-score extraction (only builds <=45-entry dicts for top candidates + held!)
                 ok_idx = np.flatnonzero(elig_row & np.isfinite(s_row))
-                if len(ok_idx) > 0:
-                    # Stable descending sort matching pandas sort_values(ascending=False)
-                    ok_vals = s_row[ok_idx]
-                    ord_idx = ok_idx[np.argsort(-ok_vals, kind="mergesort")]
-                    valid_day = pd.Series(s_row[ord_idx], index=codes_arr[ord_idx])
-                    day_ranks = {codes_list[int(ci)]: rank_i + 1 for rank_i, ci in enumerate(ord_idx)}
-                else:
-                    valid_day = pd.Series(dtype=float)
-                    day_ranks = {}
-
                 sell_reason_map: dict[str, str] = {}
                 buy_reason_map: dict[str, str] = {}
                 if cfg.holding_mode == "dynamic":
+                    rank_by_col = np.full(n_codes_total, 9999, dtype=np.int32)
+                    top_k_codes: list[str] = []
+                    day_ranks: dict[str, int] = {}
+                    score_z_sub: dict[str, float] = {}
+                    if len(ok_idx) > 0:
+                        ok_vals = s_row[ok_idx]
+                        ord_idx = ok_idx[np.argsort(-ok_vals, kind="mergesort")]
+                        rank_by_col[ord_idx] = np.arange(1, len(ord_idx) + 1, dtype=np.int32)
+                        s_mu = float(np.mean(ok_vals))
+                        s_sd = float(np.std(ok_vals, ddof=1)) if len(ok_vals) > 1 else 1.0
+                        if s_sd < 1e-12:
+                            s_sd = 1.0
+                        top_ord = ord_idx[: port_cfg.top_candidates]
+                        top_k_codes = [codes_list[int(ci)] for ci in top_ord]
+                        for rk_i, ci in enumerate(top_ord, start=1):
+                            c_code = codes_list[int(ci)]
+                            day_ranks[c_code] = rk_i
+                            score_z_sub[c_code] = float((s_row[ci] - s_mu) / s_sd)
+                        for code in held_set:
+                            ci = code_to_col[code]
+                            rk = int(rank_by_col[ci])
+                            if rk < 9999:
+                                day_ranks[code] = rk
+                                score_z_sub[code] = float((s_row[ci] - s_mu) / s_sd)
+
                     # Update consecutive weak-rank streak for every held position
                     held_states: dict[str, HeldPositionState] = {}
                     for code in held_set:
                         pos = positions[code]
                         ci = code_to_col[code]
-                        rk = day_ranks.get(code, 9999)
+                        rk = int(rank_by_col[ci])
                         if rk > dyn_cfg.buffer_rank:
                             pos.weak_rank_streak += 1
                         else:
@@ -709,13 +736,11 @@ class AShareBacktestEngine:
                         )
                     eff_cooldown = 0 if regime_label == "OFFENSIVE" else dyn_cfg.stop_cooldown_days
                     allow_entries = (day_idx - last_stop_day_idx) >= eff_cooldown
-                    # Only construct tiny dict for top_candidates tech check
-                    top_k_codes = list(valid_day.index[: port_cfg.top_candidates])
                     tech_sub = {c: bool(day_tech_row[code_to_col[c]]) for c in top_k_codes}
                     dyn_res = select_dynamic_portfolio(
-                        scores=valid_day,
+                        scores=empty_series,
                         tech_passed=tech_sub,  # type: ignore[arg-type]
-                        eligible=elig_np[day_idx],  # unused when precomputed_valid provided
+                        eligible=empty_series,
                         held_states=held_states,
                         stopped_out=stopped_recently,
                         port_cfg=port_cfg,
@@ -724,9 +749,10 @@ class AShareBacktestEngine:
                         regime=regime_label,
                         target_exposure=target_exposure,
                         allow_new_entries=allow_entries,
-                        precomputed_valid=valid_day,
                         precomputed_rank_map=day_ranks,
                         industries_dict=ind_dict,
+                        precomputed_top_pool=top_k_codes,
+                        precomputed_score_z=score_z_sub,
                     )
                     selected = dyn_res.selected
                     rank_map = dyn_res.rank_map

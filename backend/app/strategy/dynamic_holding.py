@@ -107,22 +107,32 @@ def select_dynamic_portfolio(
     precomputed_valid: pd.Series | None = None,
     precomputed_rank_map: dict[str, int] | None = None,
     industries_dict: dict[str, str] | None = None,
+    precomputed_top_pool: list[str] | None = None,
+    precomputed_score_z: dict[str, float] | None = None,
 ) -> DynamicSelectionResult:
     """Asymmetric dynamic holding & event-driven replacement selection (zero look-ahead)."""
-    if precomputed_valid is not None:
-        valid = precomputed_valid
+    if precomputed_top_pool is not None and precomputed_rank_map is not None and precomputed_score_z is not None:
+        if not precomputed_top_pool and not held_states:
+            return DynamicSelectionResult(selected=[], rank_map={})
+        rank_map = precomputed_rank_map
+        score_z = precomputed_score_z
+        top_pool = precomputed_top_pool
     else:
-        valid = scores.where(eligible.reindex(scores.index).fillna(False)).dropna().sort_values(ascending=False)
-    if valid.empty:
-        return DynamicSelectionResult(selected=[], rank_map={})
+        if precomputed_valid is not None:
+            valid = precomputed_valid
+        else:
+            valid = scores.where(eligible.reindex(scores.index).fillna(False)).dropna().sort_values(ascending=False)
+        if valid.empty:
+            return DynamicSelectionResult(selected=[], rank_map={})
 
-    rank_map = precomputed_rank_map if precomputed_rank_map is not None else {code: idx + 1 for idx, code in enumerate(valid.index)}
-    v_arr = valid.to_numpy(dtype=float)
-    s_mean = float(np.mean(v_arr))
-    s_std = float(np.std(v_arr, ddof=1)) if len(v_arr) > 1 else 1.0
-    if s_std < 1e-12:
-        s_std = 1.0
-    score_z = dict(zip(valid.index, (v_arr - s_mean) / s_std))
+        rank_map = precomputed_rank_map if precomputed_rank_map is not None else {code: idx + 1 for idx, code in enumerate(valid.index)}
+        v_arr = valid.to_numpy(dtype=float)
+        s_mean = float(np.mean(v_arr))
+        s_std = float(np.std(v_arr, ddof=1)) if len(v_arr) > 1 else 1.0
+        if s_std < 1e-12:
+            s_std = 1.0
+        score_z = dict(zip(valid.index.tolist(), (v_arr - s_mean) / s_std))
+        top_pool = list(valid.index[: port_cfg.top_candidates])
     ind_lookup = industries_dict if industries_dict is not None else industries.to_dict()
 
     if target_exposure <= 1e-6:
@@ -142,7 +152,6 @@ def select_dynamic_portfolio(
     max_names_per_ind = max(
         2, int(np.ceil(port_cfg.max_industry_weight / max(port_cfg.max_single_weight, 1e-6))) + 1
     )
-    top_pool = list(valid.index[: port_cfg.top_candidates])
     held_set = set(held_states.keys())
 
     avail_cands = (

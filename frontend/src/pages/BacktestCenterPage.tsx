@@ -207,11 +207,13 @@ export const BacktestCenterPage: React.FC = () => {
   const finishJob = async (runId: string, elapsed?: number, cacheInfo?: any) => {
     setJob(null);
     await Promise.all([loadRuns(runId), refreshCache()]);
-    const hitMsg = cacheInfo?.ml_cache_hit
-      ? '（命中两级缓存 · 秒级完成）'
-      : cacheInfo?.factor_cache_hit
-        ? '（命中全市场因子缓存）'
-        : '';
+    const hitMsg = cacheInfo?.disk_cache_hit
+      ? '（命中磁盘二级缓存 · 重启秒级完成）'
+      : cacheInfo?.ml_cache_hit
+        ? '（命中内存二级缓存 · 秒级完成）'
+        : cacheInfo?.factor_cache_hit
+          ? '（命中全市场因子缓存）'
+          : '';
     const secMsg = elapsed ? `，耗时 ${elapsed}s` : '';
     message.success(`全市场 Walk-Forward 精确回测完成${secMsg}${hitMsg}`);
   };
@@ -489,8 +491,10 @@ export const BacktestCenterPage: React.FC = () => {
               <span className="text-slate-300">
                 全库 <b className="num text-sky-400">{cacheStatus.stocks_count}</b> 股
               </span>
-              {cacheStatus.factor_panel_cached ? (
-                <Tag color="cyan" className="m-0">因子已缓存</Tag>
+              {cacheStatus.ram_cached ? (
+                <Tag color="cyan" className="m-0">内存已缓存</Tag>
+              ) : cacheStatus.disk_factor_cached ? (
+                <Tag color="green" className="m-0">磁盘缓存就绪</Tag>
               ) : (
                 <Tag color="default" className="m-0">未预热</Tag>
               )}
@@ -499,8 +503,13 @@ export const BacktestCenterPage: React.FC = () => {
                   {mode} 秒级就绪
                 </Tag>
               ))}
-              {(cacheStatus.factor_panel_cached || cacheStatus.cached_ml_modes?.length > 0) && (
-                <Tooltip title="清空内存缓存（DuckDB 更新行情后会自动失效）">
+              {cacheStatus.fold_cache_entries > 0 && (
+                <Tag color="purple" className="m-0">
+                  {cacheStatus.fold_cache_entries} Fold 增量复用
+                </Tag>
+              )}
+              {(cacheStatus.factor_panel_cached || cacheStatus.cached_ml_modes?.length > 0 || cacheStatus.fold_cache_entries > 0) && (
+                <Tooltip title="清空内存与本地磁盘研究缓存（DuckDB 更新行情后会自动失效并按 Fold 增量复用）">
                   <Button type="text" size="small" icon={<ClearOutlined />} onClick={handleClearCache} />
                 </Tooltip>
               )}
@@ -589,6 +598,7 @@ export const BacktestCenterPage: React.FC = () => {
               cash_yield_rate: 0,
               enable_regime_timing: true,
               enable_technical_filter: true,
+              include_ew_compare: false,
               include_heatmap: false,
             }}
           >
@@ -756,7 +766,7 @@ export const BacktestCenterPage: React.FC = () => {
                 ]}
               />
             </Form.Item>
-            <div className="grid grid-cols-3 gap-1 mb-3">
+            <div className="grid grid-cols-2 gap-y-1 gap-x-2 mb-3">
               <Form.Item name="enable_regime_timing" label="大盘择时" valuePropName="checked" className="mb-0">
                 <Switch size="small" />
               </Form.Item>
@@ -768,7 +778,20 @@ export const BacktestCenterPage: React.FC = () => {
               >
                 <Switch size="small" />
               </Form.Item>
-              <Form.Item name="include_heatmap" label="3×3热力图" valuePropName="checked" className="mb-0">
+              <Form.Item
+                name="include_ew_compare"
+                label={<Tooltip title="附带运行等权 vs 风险平价对照回测（风险平价需逐日算协方差矩阵，会多耗时约15~20秒，平时调参建议关闭）">权重对照</Tooltip>}
+                valuePropName="checked"
+                className="mb-0"
+              >
+                <Switch size="small" />
+              </Form.Item>
+              <Form.Item
+                name="include_heatmap"
+                label={<Tooltip title="额外串联扫描 3×3 共 9 组参数敏感性热力图（耗时约 9 倍，定稿检验时再开启）">3×3热力图</Tooltip>}
+                valuePropName="checked"
+                className="mb-0"
+              >
                 <Switch size="small" />
               </Form.Item>
             </div>

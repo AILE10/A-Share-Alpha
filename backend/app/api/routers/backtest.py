@@ -79,7 +79,8 @@ class BacktestRunRequest(BaseModel):
     drawdown_warn_pct: float = Field(default=DEFAULT_DRAWDOWN_WARN_PCT, ge=0.05, le=0.20)
     warn_exposure_mult: float = Field(default=DEFAULT_WARN_EXPOSURE_MULT, ge=0.30, le=1.0)
     cash_yield_rate: float = Field(default=0.0, ge=0.0, le=0.05)
-    include_heatmap: bool = True
+    include_ew_compare: bool = False
+    include_heatmap: bool = False
     use_cache: bool = True
 
 
@@ -159,7 +160,7 @@ def _execute_and_persist(
         end=req.end_date,
         lgbm_config=lgbm_cfg,
         bt_config=bt_cfg,
-        include_ew_compare=True,
+        include_ew_compare=req.include_ew_compare,
         include_heatmap=req.include_heatmap,
         use_cache=req.use_cache,
         progress_cb=progress_cb,
@@ -402,7 +403,7 @@ def backtest_cache_status() -> dict:
 
 @router.post("/cache-clear")
 def backtest_cache_clear() -> dict:
-    res = clear_research_cache()
+    res = clear_research_cache(include_disk=True)
     return to_jsonable({"ok": True, **res})
 
 

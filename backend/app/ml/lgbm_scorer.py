@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
@@ -70,6 +73,16 @@ class EnsembleBooster:
 
     def save_model(self, path: str) -> None:
         self.primary.save_model(path)
+
+    def __getstate__(self) -> dict:
+        return {
+            "model_strs": [b.model_to_string() for b in self.boosters],
+            "seeds": self.seeds,
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        self.boosters = [lgb.Booster(model_str=s) for s in state["model_strs"]]
+        self.seeds = tuple(state["seeds"])
 
 
 @dataclass
@@ -190,6 +203,64 @@ def _zscore_by_date(df: pd.DataFrame, raw_pred: np.ndarray) -> np.ndarray:
     return np.asarray(out, dtype=float)
 
 
+def _zscore_by_group_idx(group_ids: np.ndarray, raw_pred: np.ndarray) -> np.ndarray:
+    """Fast vectorized per-date cross-sectional z-score normalization using integer date indices."""
+    n = len(raw_pred)
+    if n <= 1:
+        return raw_pred
+    uniq, inv, counts = np.unique(group_ids, return_inverse=True, return_counts=True)
+    if len(uniq) == 1:
+        sd = float(np.std(raw_pred, ddof=1))
+        return (raw_pred - float(np.mean(raw_pred))) / sd if sd > 1e-12 else raw_pred
+    sums = np.bincount(inv, weights=raw_pred, minlength=len(uniq))
+    means = sums / np.maximum(counts, 1)
+    diff = raw_pred - means[inv]
+    sq_sums = np.bincount(inv, weights=diff * diff, minlength=len(uniq))
+    denom = np.maximum(counts - 1, 1)
+    stds = np.sqrt(np.where(counts > 1, sq_sums / denom, 0.0))
+    sd_row = stds[inv]
+    return np.where(sd_row > 1e-12, diff / np.where(sd_row > 1e-12, sd_row, 1.0), raw_pred)
+
+
+def _atomic_pickle_dump(obj, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    try:
+        with open(tmp, "wb") as f:
+            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _precompute_daily_labels(
+    fwd_np: np.ndarray,
+    valid_mask: np.ndarray,
+    mode: ModelMode,
+    n_bins: int = 10,
+) -> np.ndarray:
+    """Precompute cross-sectional per-date target labels once across the entire panel."""
+    n_dates, n_codes = fwd_np.shape
+    out = np.full((n_dates, n_codes), np.nan, dtype=np.float64)
+    for i in range(n_dates):
+        sel = valid_mask[i]
+        cnt = int(sel.sum())
+        if cnt == 0:
+            continue
+        vals = fwd_np[i, sel]
+        if mode == "lambdarank":
+            ranks = pd.Series(vals).rank(method="first").to_numpy()
+            out[i, sel] = np.floor((ranks - 1) / max(cnt, 1) * n_bins).clip(0, n_bins - 1)
+        else:
+            pct = pd.Series(vals).rank(pct=True).to_numpy()
+            out[i, sel] = pct * 2.0 - 1.0
+    return out
+
+
 class LGBMScorer:
     """LightGBM cross-sectional model supporting Huber regression & LambdaRank + Bagging + TreeSHAP."""
 
@@ -197,14 +268,13 @@ class LGBMScorer:
         self.config = config or LGBMConfig()
         self.booster: lgb.Booster | EnsembleBooster | None = None
 
-    def _fit_single(self, ordered: pd.DataFrame, X: np.ndarray, y: np.ndarray, groups: np.ndarray | None, seed: int) -> lgb.Booster:
+    def _fit_params_for_seed(self, n_rows: int, seed: int) -> dict:
         cfg = self.config
-        feats = cfg.feature_names
         common_params = {
             "num_leaves": cfg.num_leaves,
             "max_depth": cfg.max_depth,
             "learning_rate": cfg.learning_rate,
-            "min_child_samples": min(cfg.min_child_samples, max(5, len(ordered) // 20)),
+            "min_child_samples": min(cfg.min_child_samples, max(5, n_rows // 20)),
             "subsample": cfg.subsample,
             "subsample_freq": 1,
             "colsample_bytree": cfg.colsample_bytree,
@@ -216,25 +286,50 @@ class LGBMScorer:
             "deterministic": True,
             "force_row_wise": True,
         }
-
         if cfg.mode == "lambdarank":
-            params = {
+            return {
                 **common_params,
                 "objective": "lambdarank",
                 "metric": "ndcg",
                 "ndcg_eval_at": [10, 20],
                 "label_gain": list(range(10)),
             }
-            dtrain = lgb.Dataset(X, label=y, group=groups, feature_name=feats, free_raw_data=False)
-        else:
-            params = {
-                **common_params,
-                "objective": "huber",
-                "metric": "l2",
-            }
-            dtrain = lgb.Dataset(X, label=y, feature_name=feats, free_raw_data=False)
+        return {
+            **common_params,
+            "objective": "huber",
+            "metric": "l2",
+        }
 
-        return lgb.train(params, dtrain, num_boost_round=cfg.n_estimators)
+    def _fit_arrays(self, X: np.ndarray, y: np.ndarray, groups: np.ndarray | None) -> lgb.Booster | EnsembleBooster:
+        cfg = self.config
+        feats = cfg.feature_names
+        n_rows = len(X)
+        if n_rows == 0:
+            raise ValueError("Cannot train LightGBM on empty dataset")
+
+        seeds = cfg.effective_seeds()
+        grp_arg = groups if cfg.mode == "lambdarank" else None
+        if len(seeds) == 1:
+            dtrain = lgb.Dataset(X, label=y, group=grp_arg, feature_name=feats, free_raw_data=False)
+            self.booster = lgb.train(
+                self._fit_params_for_seed(n_rows, seeds[0]),
+                dtrain,
+                num_boost_round=cfg.n_estimators,
+            )
+        else:
+            boosters = []
+            for s in seeds:
+                # Per-seed Dataset lets LightGBM bind data_random_seed=seed for exact bin-sampling bagging diversity
+                dtrain = lgb.Dataset(X, label=y, group=grp_arg, feature_name=feats, free_raw_data=False)
+                boosters.append(
+                    lgb.train(
+                        self._fit_params_for_seed(n_rows, s),
+                        dtrain,
+                        num_boost_round=cfg.n_estimators,
+                    )
+                )
+            self.booster = EnsembleBooster(boosters, seeds=seeds)
+        return self.booster
 
     def fit(self, train_df: pd.DataFrame) -> lgb.Booster | EnsembleBooster:
         cfg = self.config
@@ -251,13 +346,59 @@ class LGBMScorer:
             y = _make_reg_labels(ordered)
             groups = None
 
-        seeds = cfg.effective_seeds()
-        if len(seeds) == 1:
-            self.booster = self._fit_single(ordered, X, y, groups, seeds[0])
-        else:
-            boosters = [self._fit_single(ordered, X, y, groups, s) for s in seeds]
-            self.booster = EnsembleBooster(boosters, seeds=seeds)
-        return self.booster
+        return self._fit_arrays(X, y, groups)
+
+    def _predict_arrays(
+        self,
+        X: np.ndarray,
+        group_ids: np.ndarray,
+        booster: lgb.Booster | EnsembleBooster | None = None,
+    ) -> np.ndarray:
+        b = booster or self.booster
+        if b is None:
+            raise ValueError("Model not fitted")
+        if len(X) == 0:
+            return np.array([], dtype=float)
+        if isinstance(b, EnsembleBooster) and len(b.boosters) > 1:
+            z_preds = [_zscore_by_group_idx(group_ids, np.asarray(m.predict(X), dtype=float)) for m in b.boosters]
+            return np.mean(z_preds, axis=0)
+        return np.asarray(b.predict(X), dtype=float)
+
+    def _predict_shap_arrays(
+        self,
+        X: np.ndarray,
+        group_ids: np.ndarray,
+        booster: lgb.Booster | EnsembleBooster | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        b = booster or self.booster
+        if b is None:
+            raise ValueError("Model not fitted")
+        n_feats = len(self.config.feature_names)
+        if len(X) == 0:
+            return np.array([], dtype=float), np.empty((0, n_feats), dtype=float)
+        if isinstance(b, EnsembleBooster) and len(b.boosters) > 1:
+            z_preds: list[np.ndarray] = []
+            shap_list: list[np.ndarray] = []
+            uniq, inv, counts = np.unique(group_ids, return_inverse=True, return_counts=True)
+            for m in b.boosters:
+                raw_p = np.asarray(m.predict(X), dtype=float)
+                c = np.asarray(m.predict(X, pred_contrib=True), dtype=float)[:, :n_feats]
+                sums = np.bincount(inv, weights=raw_p, minlength=len(uniq))
+                means = sums / np.maximum(counts, 1)
+                diff = raw_p - means[inv]
+                sq_sums = np.bincount(inv, weights=diff * diff, minlength=len(uniq))
+                stds = np.sqrt(np.where(counts > 1, sq_sums / np.maximum(counts - 1, 1), 0.0))
+                sd_row = stds[inv]
+                valid_sd = sd_row > 1e-12
+                scale = np.where(valid_sd, sd_row, 1.0)
+                z_p = np.where(valid_sd, diff / scale, raw_p)
+                z_preds.append(z_p)
+                shap_list.append(c / scale[:, None])
+            return np.mean(z_preds, axis=0), np.mean(shap_list, axis=0)
+
+        scores = np.asarray(b.predict(X), dtype=float)
+        contrib = np.asarray(b.predict(X, pred_contrib=True), dtype=float)[:, :n_feats]
+        return scores, contrib
 
     def predict(self, df: pd.DataFrame, booster: lgb.Booster | EnsembleBooster | None = None) -> np.ndarray:
         b = booster or self.booster
@@ -338,8 +479,17 @@ class LGBMScorer:
         eligible: pd.DataFrame,
         adaptive: bool = True,
         progress_cb: Callable[[str, float], None] | None = None,
+        fold_cache_dir: Path | None = None,
     ) -> WalkForwardMLResult:
-        """Run strict Purged Walk-Forward training & out-of-sample prediction across the entire panel."""
+        """Run strict Purged Walk-Forward training & out-of-sample prediction across the entire panel.
+
+        Optimized with:
+          * Single pre-stacked 3D NumPy feature tensor & precomputed daily cross-sectional labels
+            (eliminating 44x DataFrame re-stacking & 1,381x per-day fwd_excess reindexing).
+          * Optional cryptographic per-fold disk cache (`fold_cache_dir`): when DuckDB adds new
+            trailing bars, all unchanged historical folds reuse cached OOS scores/SHAP in milliseconds
+            while any altered fold automatically misses and retrains cleanly.
+        """
         cfg = self.config
         feats = cfg.feature_names
         # Enforce embargo >= max(MIN_EMBARGO_DAYS, label_horizon) so zero label overlap can occur
@@ -360,116 +510,248 @@ class LGBMScorer:
         if not folds:
             raise ValueError("PurgedWalkForwardSplitter generated zero folds")
 
+        dates = eligible.index
         codes = list(eligible.columns)
-        oos_scores = pd.DataFrame(np.nan, index=eligible.index, columns=codes)
+        codes_arr = np.asarray(codes, dtype=object)
+        n_dates, n_codes, n_feats = len(dates), len(codes), len(feats)
+
+        # Pre-stack all features, eligibility, forward labels & daily rank targets ONCE
+        elig_all = eligible.fillna(False).to_numpy(dtype=bool)
+        X_all = np.empty((n_dates, n_codes, n_feats), dtype=np.float64)
+        for k, name in enumerate(feats):
+            X_all[:, :, k] = std_factors[name].reindex(index=dates, columns=codes).to_numpy(dtype=np.float64)
+        valid_feat_all = elig_all & (np.isfinite(X_all).mean(axis=2) >= 0.5)
+        X_all = np.where(np.isfinite(X_all), X_all, 0.0)
+
+        fwd_np = fwd_excess.reindex(index=dates, columns=codes).to_numpy(dtype=np.float64)
+        train_valid_all = valid_feat_all & np.isfinite(fwd_np)
+        y_all = _precompute_daily_labels(fwd_np, train_valid_all, cfg.mode)
+
+        oos_scores_np = np.full((n_dates, n_codes), np.nan, dtype=np.float64)
         oos_shap: dict[pd.Timestamp, pd.DataFrame] = {}
         fold_records: list[dict] = []
-        gain_acc = np.zeros(len(feats), dtype=float)
-        shap_acc = np.zeros(len(feats), dtype=float)
+        gain_acc = np.zeros(n_feats, dtype=float)
+        shap_acc = np.zeros(n_feats, dtype=float)
         n_fitted = 0
+        fold_cache_hits = 0
         latest_booster: lgb.Booster | EnsembleBooster | None = None
         latest_train_range = ("", "")
         total_steps = len(folds) + 1
         n_seeds = len(cfg.effective_seeds())
 
+        # Deterministic config signature for per-fold disk cache safety
+        cfg_sig = repr((
+            "v5",
+            cfg.mode,
+            cfg.label_horizon,
+            cfg.num_leaves,
+            cfg.max_depth,
+            cfg.learning_rate,
+            cfg.n_estimators,
+            cfg.min_child_samples,
+            cfg.subsample,
+            cfg.colsample_bytree,
+            cfg.reg_alpha,
+            cfg.reg_lambda,
+            cfg.effective_seeds(),
+            tuple(feats),
+        )).encode("utf-8")
+
+        def _extract_slice(date_slice: pd.DatetimeIndex, with_labels: bool):
+            d_idx = dates.get_indexer(date_slice)
+            d_idx = d_idx[d_idx >= 0]
+            if len(d_idx) == 0:
+                return np.empty((0, n_feats), dtype=np.float64), np.empty(0, dtype=np.float64), np.empty(0, dtype=np.intp), np.empty(0, dtype=np.intp)
+            mask = train_valid_all[d_idx] if with_labels else valid_feat_all[d_idx]
+            r_loc, c_loc = np.where(mask)
+            if len(r_loc) == 0:
+                return np.empty((0, n_feats), dtype=np.float64), np.empty(0, dtype=np.float64), np.empty(0, dtype=np.intp), np.empty(0, dtype=np.intp)
+            r_abs = d_idx[r_loc]
+            X_sub = np.ascontiguousarray(X_all[r_abs, c_loc])
+            y_sub = np.ascontiguousarray(y_all[r_abs, c_loc]) if with_labels else np.empty(0, dtype=np.float64)
+            return X_sub, y_sub, r_abs, c_loc
+
         for f_idx, fold in enumerate(folds):
-            if progress_cb:
-                progress_cb(
-                    f"LightGBM ({cfg.mode} · {n_seeds}xBag · H{cfg.label_horizon}d) Fold {f_idx + 1}/{len(folds)} "
-                    f"[{fold.test_start.date()} ~ {fold.test_end.date()}]",
-                    f_idx / total_steps,
-                )
-            train_df = build_ml_dataset(std_factors, eligible, fwd_excess, feats, dates_filter=fold.train_dates)
-            test_df = build_ml_dataset(std_factors, eligible, fwd_excess=None, feature_names=feats, dates_filter=fold.test_dates)
-            if len(train_df) < 50 or test_df.empty:
+            X_tr, y_tr, tr_r, tr_c = _extract_slice(fold.train_dates, with_labels=True)
+            X_te, _, te_r, te_c = _extract_slice(fold.test_dates, with_labels=False)
+            if len(X_tr) < 50 or len(X_te) == 0:
                 continue
 
-            booster = self.fit(train_df)
-            scores = self.predict(test_df, booster)
-            test_df = test_df.copy()
-            test_df["score"] = scores
+            # Representative dates for TreeSHAP (every ~15th test day + fold end)
+            te_uniq_r = np.unique(te_r)
+            shap_r_set = set(int(x) for x in te_uniq_r[::15])
+            shap_r_set.add(int(te_uniq_r[-1]))
 
-            # Scatter OOS scores across every test date
-            for dt, grp in test_df.groupby("trade_date", sort=True):
-                ts = pd.Timestamp(dt)
-                oos_scores.loc[ts, grp["ts_code"].to_numpy()] = grp["score"].to_numpy()
+            fold_cache_path: Path | None = None
+            cached_fold = None
+            if fold_cache_dir is not None:
+                h = hashlib.blake2b(digest_size=16)
+                h.update(cfg_sig)
+                h.update(f"|{fold.train_start.date()}|{fold.train_end.date()}|{fold.test_start.date()}|{fold.test_end.date()}|".encode("utf-8"))
+                h.update(X_tr.tobytes())
+                h.update(y_tr.tobytes())
+                h.update(X_te.tobytes())
+                h.update(te_r.tobytes())
+                h.update(te_c.tobytes())
+                fold_cache_path = fold_cache_dir / f"fold_{h.hexdigest()}.pkl"
+                if fold_cache_path.exists():
+                    try:
+                        with open(fold_cache_path, "rb") as fh:
+                            cached_fold = pickle.load(fh)
+                    except Exception:  # noqa: BLE001
+                        cached_fold = None
 
-            # Compute exact TreeSHAP on representative fold dates (every ~15th day + fold end)
-            # to keep full-market 4,111-stock Walk-Forward ~4x faster with unbiased SHAP attribution
-            fold_unique_dates = pd.DatetimeIndex(sorted(test_df["trade_date"].unique()))
-            shap_dates = set(fold_unique_dates[::15])
-            shap_dates.add(fold_unique_dates[-1])
-            shap_sub = test_df[test_df["trade_date"].isin(shap_dates)]
-            _, shap_df = self.predict_with_shap(shap_sub, booster)
-            for dt, grp in shap_sub.groupby("trade_date", sort=True):
-                ts = pd.Timestamp(dt)
-                s_mat = shap_df.loc[grp.index].copy()
-                s_mat.index = grp["ts_code"].to_numpy()
-                oos_shap[ts] = s_mat
+            if cached_fold is not None:
+                fold_cache_hits += 1
+                if progress_cb:
+                    progress_cb(
+                        f"命中磁盘 Fold 缓存 ({fold_cache_hits}/{f_idx + 1}) · Fold {f_idx + 1}/{len(folds)} "
+                        f"[{fold.test_start.date()} ~ {fold.test_end.date()}]",
+                        f_idx / total_steps,
+                    )
+                scores = cached_fold["scores"]
+                shap_by_r = cached_fold["shap_by_r"]
+                gain_norm = cached_fold["gain_norm"]
+                shap_norm = cached_fold["shap_norm"]
+                oos_scores_np[te_r, te_c] = scores
+                for r_i, (c_arr_i, s_mat_i) in shap_by_r.items():
+                    oos_shap[dates[r_i]] = pd.DataFrame(s_mat_i, index=codes_arr[c_arr_i], columns=feats)
+            else:
+                if progress_cb:
+                    progress_cb(
+                        f"LightGBM ({cfg.mode} · {n_seeds}xBag · H{cfg.label_horizon}d) Fold {f_idx + 1}/{len(folds)} "
+                        f"[{fold.test_start.date()} ~ {fold.test_end.date()}]",
+                        f_idx / total_steps,
+                    )
+                if cfg.mode == "lambdarank":
+                    _, groups_tr = np.unique(tr_r, return_counts=True)
+                    y_fit = y_tr.astype(np.int32)
+                else:
+                    groups_tr = None
+                    y_fit = y_tr
+                booster = self._fit_arrays(X_tr, y_fit, groups_tr)
+                scores = self._predict_arrays(X_te, te_r, booster)
+                oos_scores_np[te_r, te_c] = scores
 
-            # Fold OOS IC / RankIC
+                shap_mask = np.isin(te_r, list(shap_r_set))
+                X_sh = X_te[shap_mask]
+                sh_r = te_r[shap_mask]
+                sh_c = te_c[shap_mask]
+                _, shap_arr = self._predict_shap_arrays(X_sh, sh_r, booster)
+
+                shap_by_r: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+                for r_i in sorted(shap_r_set):
+                    sel_r = sh_r == r_i
+                    if sel_r.any():
+                        c_arr_i = sh_c[sel_r]
+                        s_mat_i = shap_arr[sel_r]
+                        shap_by_r[r_i] = (c_arr_i, s_mat_i)
+                        oos_shap[dates[r_i]] = pd.DataFrame(s_mat_i, index=codes_arr[c_arr_i], columns=feats)
+
+                gain = np.asarray(booster.feature_importance(importance_type="gain"), dtype=float)
+                gain_norm = gain / max(gain.sum(), 1e-12)
+                shap_abs = np.abs(shap_arr).mean(axis=0) if len(shap_arr) else np.zeros(n_feats, dtype=float)
+                shap_norm = shap_abs / max(shap_abs.sum(), 1e-12)
+                latest_booster = booster
+                latest_train_range = (str(fold.train_start.date()), str(fold.train_end.date()))
+
+                if fold_cache_path is not None:
+                    _atomic_pickle_dump(
+                        {
+                            "scores": scores,
+                            "shap_by_r": shap_by_r,
+                            "gain_norm": gain_norm,
+                            "shap_norm": shap_norm,
+                        },
+                        fold_cache_path,
+                    )
+
+            # Fast zero-reindex Fold OOS IC / RankIC directly from NumPy rows
             f_ics, f_rics = [], []
-            for dt in fold.test_dates:
-                s_row = oos_scores.loc[dt].to_numpy(dtype=float)
-                y_row = fwd_excess.reindex(index=eligible.index, columns=codes).loc[dt].to_numpy(dtype=float)
-                ic, ric, _ = cross_ic(s_row, y_row, min_n=10)
+            for r_i in te_uniq_r:
+                ic, ric, _ = cross_ic(oos_scores_np[r_i], fwd_np[r_i], min_n=10)
                 if not np.isnan(ic):
                     f_ics.append(ic)
                     f_rics.append(ric)
 
-            gain = np.asarray(booster.feature_importance(importance_type="gain"), dtype=float)
-            gain_norm = gain / max(gain.sum(), 1e-12)
-            shap_abs = shap_df.abs().mean(axis=0).to_numpy(dtype=float)
-            shap_norm = shap_abs / max(shap_abs.sum(), 1e-12)
             gain_acc += gain_norm
             shap_acc += shap_norm
             n_fitted += 1
-            latest_booster = booster
-            latest_train_range = (str(fold.train_start.date()), str(fold.train_end.date()))
+            if not latest_train_range[0]:
+                latest_train_range = (str(fold.train_start.date()), str(fold.train_end.date()))
 
             rec = fold.to_dict()
             rec["oos_ic"] = float(np.mean(f_ics)) if f_ics else None
             rec["oos_rank_ic"] = float(np.mean(f_rics)) if f_rics else None
             fold_records.append(rec)
 
-        # Fit a production-ready latest booster using the most recent labeled window
+        if fold_cache_hits > 0:
+            logger.info("Walk-Forward per-fold disk cache: %d/%d folds reused", fold_cache_hits, len(folds))
+
+        # Fit (or load cached) production-ready latest booster using the most recent labeled window
         # (ending strictly label_horizon days before the latest date so every label is realized)
         if progress_cb:
             progress_cb(f"LightGBM ({cfg.mode} · {n_seeds}xBag) 拟合最新滚动快照与样本外 IC 评估...", len(folds) / total_steps)
         labeled_dates = warm_dates[:-cfg.label_horizon] if len(warm_dates) > cfg.label_horizon + 40 else warm_dates
         prod_window = labeled_dates[-min(cfg.train_window, len(labeled_dates)):]
-        prod_df = build_ml_dataset(std_factors, eligible, fwd_excess, feats, dates_filter=prod_window)
-        if len(prod_df) >= 50:
-            latest_booster = self.fit(prod_df)
+        X_prod, y_prod, prod_r, _ = _extract_slice(prod_window, with_labels=True)
+        if len(X_prod) >= 50:
+            prod_cache_path: Path | None = None
+            cached_prod = None
+            if fold_cache_dir is not None:
+                hp = hashlib.blake2b(digest_size=16)
+                hp.update(b"prod|")
+                hp.update(cfg_sig)
+                hp.update(f"|{prod_window[0].date()}|{prod_window[-1].date()}|".encode("utf-8"))
+                hp.update(X_prod.tobytes())
+                hp.update(y_prod.tobytes())
+                prod_cache_path = fold_cache_dir / f"prod_{hp.hexdigest()}.pkl"
+                if prod_cache_path.exists():
+                    try:
+                        with open(prod_cache_path, "rb") as fh:
+                            cached_prod = pickle.load(fh)
+                    except Exception:  # noqa: BLE001
+                        cached_prod = None
+
+            if cached_prod is not None:
+                latest_booster = cached_prod
+            else:
+                if cfg.mode == "lambdarank":
+                    _, prod_groups = np.unique(prod_r, return_counts=True)
+                    y_pfit = y_prod.astype(np.int32)
+                else:
+                    prod_groups = None
+                    y_pfit = y_prod
+                latest_booster = self._fit_arrays(X_prod, y_pfit, prod_groups)
+                if prod_cache_path is not None:
+                    _atomic_pickle_dump(latest_booster, prod_cache_path)
+
             latest_train_range = (str(prod_window[0].date()), str(prod_window[-1].date()))
             # Fill ONLY trailing dates strictly AFTER the last walk-forward fold's test_end
-            # (NEVER backfill pre-OOS training dates before folds[0].test_start -> strict zero look-ahead!)
             last_fold_end = max(f.test_end for f in folds)
-            trailing = warm_dates[(warm_dates > last_fold_end) & oos_scores.loc[warm_dates].isna().all(axis=1)]
+            warm_idx = dates.get_indexer(warm_dates)
+            has_any_oos = np.isfinite(oos_scores_np).any(axis=1)
+            trailing = warm_dates[(warm_dates > last_fold_end) & (~has_any_oos[warm_idx])]
             if len(trailing):
-                live_df = build_ml_dataset(std_factors, eligible, None, feats, dates_filter=trailing)
-                if not live_df.empty:
-                    l_scores, l_shap = self.predict_with_shap(live_df, latest_booster)
-                    live_df = live_df.copy()
-                    live_df["score"] = l_scores
-                    for dt, grp in live_df.groupby("trade_date", sort=True):
-                        ts = pd.Timestamp(dt)
-                        oos_scores.loc[ts, grp["ts_code"].to_numpy()] = grp["score"].to_numpy()
-                        s_mat = l_shap.loc[grp.index].copy()
-                        s_mat.index = grp["ts_code"].to_numpy()
-                        oos_shap[ts] = s_mat
+                X_live, _, live_r, live_c = _extract_slice(trailing, with_labels=False)
+                if len(X_live):
+                    l_scores, l_shap = self._predict_shap_arrays(X_live, live_r, latest_booster)
+                    oos_scores_np[live_r, live_c] = l_scores
+                    for r_i in np.unique(live_r):
+                        sel_r = live_r == r_i
+                        oos_shap[dates[r_i]] = pd.DataFrame(l_shap[sel_r], index=codes_arr[live_c[sel_r]], columns=feats)
 
-        # Overall OOS IC time series
+        oos_scores = pd.DataFrame(oos_scores_np, index=dates, columns=codes)
+
+        # Overall OOS IC time series (fast direct NumPy row scans)
         ic_list, ric_list, ic_dates = [], [], []
-        fwd_aligned = fwd_excess.reindex_like(oos_scores)
-        for dt in oos_scores.index:
-            s_row = oos_scores.loc[dt].to_numpy(dtype=float)
-            if np.isnan(s_row).all():
+        for r_i in range(n_dates):
+            s_row = oos_scores_np[r_i]
+            if not np.isfinite(s_row).any():
                 continue
-            y_row = fwd_aligned.loc[dt].to_numpy(dtype=float)
-            ic, ric, _ = cross_ic(s_row, y_row, min_n=10)
+            ic, ric, _ = cross_ic(s_row, fwd_np[r_i], min_n=10)
             if not np.isnan(ic):
-                ic_dates.append(dt)
+                ic_dates.append(dates[r_i])
                 ic_list.append(ic)
                 ric_list.append(ric)
 
