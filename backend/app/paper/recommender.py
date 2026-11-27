@@ -18,6 +18,8 @@ from app.core.constants import (
     DEFAULT_BULL_MOM_H120_WEIGHT,
     DEFAULT_BULL_MOM_RET20_WEIGHT,
     DEFAULT_MIN_PRICE,
+    DEFAULT_NON_BULL_BP250_WEIGHT,
+    DEFAULT_NON_BULL_DL250_WEIGHT,
     FACTOR_META_MAP,
 )
 from app.core.logging import get_logger
@@ -36,8 +38,10 @@ from app.strategy.dynamic_holding import (
 from app.strategy.optimizer import PortfolioConfig, select_portfolio_names, solve_portfolio_weights
 from app.strategy.regime import (
     apply_bull_momentum_overlay,
+    apply_non_bull_lowpos_overlay,
     compute_bull_momentum_zscores,
     compute_market_regime,
+    compute_non_bull_lowpos_zscores,
     persist_market_regime,
 )
 from app.strategy.technical import compute_technical_signals
@@ -177,6 +181,7 @@ class RecommendationEngine:
 
         score_series = pd.Series(scores_arr, index=latest_df["ts_code"].to_numpy())
         z_h120_df, z_r20_df = compute_bull_momentum_zscores(panel, f_run.universe.eligible)
+        z_dl250_df, z_bp250_df = compute_non_bull_lowpos_zscores(panel, f_run.universe.eligible)
         live_regime_label = str(regime_info["regime"])
         if live_regime_label == "OFFENSIVE":
             score_series = apply_bull_momentum_overlay(
@@ -186,6 +191,16 @@ class RecommendationEngine:
                 z_r20_row=z_r20_df.loc[latest_dt],
                 w_h120=DEFAULT_BULL_MOM_H120_WEIGHT,
                 w_r20=DEFAULT_BULL_MOM_RET20_WEIGHT,
+            )
+            latest_df["score"] = score_series.to_numpy()
+        else:
+            score_series = apply_non_bull_lowpos_overlay(
+                scores=score_series,
+                regime=live_regime_label,
+                z_dl250_row=z_dl250_df.loc[latest_dt],
+                z_bp250_row=z_bp250_df.loc[latest_dt],
+                w_dl250=DEFAULT_NON_BULL_DL250_WEIGHT,
+                w_bp250=DEFAULT_NON_BULL_BP250_WEIGHT,
             )
             latest_df["score"] = score_series.to_numpy()
         shap_by_code = shap_df.copy()
@@ -330,6 +345,15 @@ class RecommendationEngine:
                                 z_r20_row=z_r20_df.loc[ts_td],
                                 w_h120=DEFAULT_BULL_MOM_H120_WEIGHT,
                                 w_r20=DEFAULT_BULL_MOM_RET20_WEIGHT,
+                            )
+                        elif td_reg != "OFFENSIVE" and ts_td in z_dl250_df.index:
+                            td_scores = apply_non_bull_lowpos_overlay(
+                                scores=td_scores,
+                                regime=td_reg,
+                                z_dl250_row=z_dl250_df.loc[ts_td],
+                                z_bp250_row=z_bp250_df.loc[ts_td],
+                                w_dl250=DEFAULT_NON_BULL_DL250_WEIGHT,
+                                w_bp250=DEFAULT_NON_BULL_BP250_WEIGHT,
                             )
                         ordered_codes = td_scores.sort_values(ascending=False).index.tolist()
                         rm = {c: i + 1 for i, c in enumerate(ordered_codes)}

@@ -33,9 +33,14 @@ DEFAULT_MIN_LIST_DAYS = 120
 DEFAULT_MIN_AVG_AMOUNT_20D = 50_000_000.0  # 5000 万元
 DEFAULT_MICRO_CAP_QUANTILE = 0.10          # 剔除总市值后 10%
 DEFAULT_MIN_PRICE = 2.5                    # 防 1 元面值退市硬底线（剔除 < 2.5 元低价仙股）
-DEFAULT_BULL_MOM_H120_WEIGHT = 0.25        # Champion 1b：OFFENSIVE 强牛期纯距120日新高突破叠加（非强牛=0）
-DEFAULT_BULL_MOM_RET20_WEIGHT = 0.0        # Champion 1b：关闭易短期均值回归的20日追高动量
-DEFAULT_DRAWDOWN_WARN_PCT = 0.11           # Champion 1b：防牛市锁仓预警线 -11%（保留 -12% 硬熔断红线不变）
+DEFAULT_TARGET_HOLDINGS = 15               # Champion V2：15 只分散持股（单票约 6.5%，远低于 12% 风控红线，6/6 全年正收益）
+DEFAULT_BUFFER_RANK = 45                   # Champion V2：匹配 15 只持股的 3x 缓冲带（降换手 26%）
+DEFAULT_WEIGHT_METHOD = "equal_weight"     # Champion V2：动态持有下等权消除每日协方差再平衡摩擦
+DEFAULT_BULL_MOM_H120_WEIGHT = 0.25        # Champion V2：OFFENSIVE 强牛期纯距120日新高突破叠加（非强牛=0）
+DEFAULT_BULL_MOM_RET20_WEIGHT = 0.0        # Champion V2：关闭易短期均值回归的20日追高动量
+DEFAULT_NON_BULL_DL250_WEIGHT = 0.10       # Champion V2：非强牛期 250 日低位距离安全垫（远离年线高位、贴近年内低位）
+DEFAULT_NON_BULL_BP250_WEIGHT = 0.10       # Champion V2：非强牛期自身 250 日 PB 估值低位分位安全垫
+DEFAULT_DRAWDOWN_WARN_PCT = 0.11           # 防牛市锁仓预警线 -11%（保留 -12% 硬熔断红线不变）
 DEFAULT_DRAWDOWN_HALT_PCT = 0.12           # 组合硬熔断红线 -12%（永不放宽）
 DEFAULT_WARN_EXPOSURE_MULT = 0.70          # 预警态温和降仓至 70%（避免 0.50x 半速踏空主升浪）
 

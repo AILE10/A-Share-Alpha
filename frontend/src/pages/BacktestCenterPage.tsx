@@ -35,54 +35,91 @@ interface RunningJobState {
 
 const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
   {
-    label: '最优动态+Huber10日Bag6+120日新高突破(推荐)',
+    label: '全周期双态冠军V2 · N=15等权(推荐)',
     values: {
-      name: '最优动态持有-Huber10日Bag6+120日新高突破(Champion1b)',
+      name: '全周期双态冠军V2-N15等权+牛市突破+非牛市250日低位锚定',
+      start_date: '',
+      end_date: '',
       model_mode: 'regression',
       ensemble_seeds_count: 6,
-      weight_method: 'risk_parity',
+      weight_method: 'equal_weight',
       holding_mode: 'dynamic',
       min_hold_days: 10,
-      buffer_rank: 35,
+      buffer_rank: 45,
       deep_exit_rank: 150,
       exit_confirm_days: 3,
       swap_score_gap: 0.7,
       profit_ride_pct: 0.1,
       profit_protect_pct: 0.15,
       stop_cooldown_days: 5,
-      target_holdings: 10,
+      target_holdings: 15,
       hard_stop_pct: 0.08,
       atr_stop_mult: 2.5,
       slippage_bps: 10,
       bull_mom_h120_weight: 0.25,
       bull_mom_ret20_weight: 0,
+      non_bull_dl250_weight: 0.1,
+      non_bull_bp250_weight: 0.1,
       enable_regime_timing: true,
       enable_technical_filter: true,
-      include_heatmap: true,
+      include_heatmap: false,
     },
   },
   {
-    label: '对照:纯模型(关闭强牛动量)',
+    label: '极低回撤版 · N=15风险平价(MDD~10%)',
     values: {
-      name: '对照实验-Huber10日Bag6纯模型(关强牛动量)',
+      name: '极低回撤版V2-N15风险平价+双态锚定',
+      start_date: '',
+      end_date: '',
       model_mode: 'regression',
       ensemble_seeds_count: 6,
       weight_method: 'risk_parity',
       holding_mode: 'dynamic',
       min_hold_days: 10,
-      buffer_rank: 35,
+      buffer_rank: 45,
       deep_exit_rank: 150,
       exit_confirm_days: 3,
       swap_score_gap: 0.7,
       profit_ride_pct: 0.1,
       profit_protect_pct: 0.15,
       stop_cooldown_days: 5,
-      target_holdings: 10,
+      target_holdings: 15,
+      hard_stop_pct: 0.08,
+      atr_stop_mult: 2.5,
+      slippage_bps: 10,
+      bull_mom_h120_weight: 0.25,
+      bull_mom_ret20_weight: 0,
+      non_bull_dl250_weight: 0.1,
+      non_bull_bp250_weight: 0.1,
+      enable_regime_timing: true,
+      enable_technical_filter: true,
+      include_heatmap: false,
+    },
+  },
+  {
+    label: '对照:纯模型(关闭双态叠加)',
+    values: {
+      name: '对照实验-Huber10日Bag6纯模型(关双态叠加)',
+      model_mode: 'regression',
+      ensemble_seeds_count: 6,
+      weight_method: 'equal_weight',
+      holding_mode: 'dynamic',
+      min_hold_days: 10,
+      buffer_rank: 45,
+      deep_exit_rank: 150,
+      exit_confirm_days: 3,
+      swap_score_gap: 0.7,
+      profit_ride_pct: 0.1,
+      profit_protect_pct: 0.15,
+      stop_cooldown_days: 5,
+      target_holdings: 15,
       hard_stop_pct: 0.08,
       atr_stop_mult: 2.5,
       slippage_bps: 10,
       bull_mom_h120_weight: 0,
       bull_mom_ret20_weight: 0,
+      non_bull_dl250_weight: 0,
+      non_bull_bp250_weight: 0,
       enable_regime_timing: true,
       enable_technical_filter: true,
       include_heatmap: false,
@@ -94,16 +131,6 @@ const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
       name: '对照实验-固定10日调仓',
       holding_mode: 'fixed',
       rebalance_days: 10,
-      buffer_rank: 25,
-      include_heatmap: false,
-    },
-  },
-  {
-    label: '对照:固定5日',
-    values: {
-      name: '对照实验-固定5日调仓',
-      holding_mode: 'fixed',
-      rebalance_days: 5,
       buffer_rank: 25,
       include_heatmap: false,
     },
@@ -121,8 +148,15 @@ const PRESETS: Array<{ label: string; values: Record<string, any> }> = [
   {
     label: '压力:20bps滑点',
     values: {
-      name: '压力测试-动态持有(20bps高滑点)',
+      name: '压力测试-冠军V2(20bps双倍滑点)',
       holding_mode: 'dynamic',
+      weight_method: 'equal_weight',
+      target_holdings: 15,
+      buffer_rank: 45,
+      bull_mom_h120_weight: 0.25,
+      bull_mom_ret20_weight: 0,
+      non_bull_dl250_weight: 0.1,
+      non_bull_bp250_weight: 0.1,
       slippage_bps: 20,
       include_heatmap: false,
     },
@@ -528,12 +562,12 @@ export const BacktestCenterPage: React.FC = () => {
             layout="vertical"
             size="small"
             initialValues={{
-              name: '最优动态持有-Huber10日Bag6+120日新高突破(25年1月至今)',
-              start_date: '2025-01-01',
+              name: '全周期双态冠军V2-N15等权+双态锚定(2021~2026完整牛熊)',
+              start_date: '',
               end_date: '',
               model_mode: 'regression',
               ensemble_seeds_count: 6,
-              weight_method: 'risk_parity',
+              weight_method: 'equal_weight',
               holding_mode: 'dynamic',
               rebalance_days: 10,
               min_hold_days: 10,
@@ -543,30 +577,32 @@ export const BacktestCenterPage: React.FC = () => {
               profit_ride_pct: 0.1,
               profit_protect_pct: 0.15,
               stop_cooldown_days: 5,
-              target_holdings: 10,
-              buffer_rank: 35,
+              target_holdings: 15,
+              buffer_rank: 45,
               hard_stop_pct: 0.08,
               atr_stop_mult: 2.5,
               slippage_bps: 10,
               bull_mom_h120_weight: 0.25,
               bull_mom_ret20_weight: 0,
+              non_bull_dl250_weight: 0.1,
+              non_bull_bp250_weight: 0.1,
               cash_yield_rate: 0,
               enable_regime_timing: true,
               enable_technical_filter: true,
-              include_heatmap: true,
+              include_heatmap: false,
             }}
           >
             <Form.Item name="name" label="实验名称（便于多轮对比）" rules={[{ required: true, message: '请输入实验名称' }]}>
-              <Input placeholder="例如：最优动态持有-Huber回归(25年1月至今)" />
+              <Input placeholder="例如：全周期双态冠军V2(2021~2026)" />
             </Form.Item>
             <div className="mb-2">
               <div className="text-[11px] text-slate-400 mb-1">快捷回测区间：</div>
               <div className="flex flex-wrap gap-1">
                 {[
+                  { label: '完整5.8年牛熊', s: '', e: '' },
+                  { label: '24年8月至今', s: '2024-08-15', e: '' },
                   { label: '25年1月至今', s: '2025-01-01', e: '' },
-                  { label: '全部样本外', s: '', e: '' },
-                  { label: '仅2025年', s: '2025-01-01', e: '2025-12-31' },
-                  { label: '仅2026年', s: '2026-01-01', e: '' },
+                  { label: '21~24年熊市大考', s: '2021-03-18', e: '2024-08-15' },
                 ].map((rg) => (
                   <Tag
                     key={rg.label}
@@ -611,7 +647,7 @@ export const BacktestCenterPage: React.FC = () => {
               </Form.Item>
             </div>
             <Form.Item name="weight_method" label="组合优化权重">
-              <Select options={[{ value: 'risk_parity', label: '风险平价 (Risk Parity)' }, { value: 'equal_weight', label: '等权组合 (Equal Weight)' }]} />
+              <Select options={[{ value: 'equal_weight', label: '等权组合 (Equal Weight · 推荐)' }, { value: 'risk_parity', label: '风险平价 (Risk Parity · 极低回撤)' }]} />
             </Form.Item>
             {holdingMode === 'dynamic' ? (
               <>
@@ -683,13 +719,27 @@ export const BacktestCenterPage: React.FC = () => {
             <div className="grid grid-cols-2 gap-2">
               <Form.Item
                 name="bull_mom_h120_weight"
-                label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：叠加距120日新高突破 Z-Score，捕捉无套牢盘主升浪龙头（默认 0.25，震荡/熊市=0）">强牛新高倾斜</Tooltip>}
+                label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：叠加距120日新高突破 Z-Score，捕捉无套牢盘主升浪龙头（默认 0.25，非强牛=0）">强牛新高倾斜</Tooltip>}
               >
                 <InputNumber min={0} max={0.5} step={0.05} className="w-full" />
               </Form.Item>
               <Form.Item
                 name="bull_mom_ret20_weight"
                 label={<Tooltip title="仅在 OFFENSIVE 强牛状态生效：20日短线动量 Z-Score（实证 A 股短线追高易反转，默认 0 关闭）">强牛动量倾斜</Tooltip>}
+              >
+                <InputNumber min={0} max={0.5} step={0.02} className="w-full" />
+              </Form.Item>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Form.Item
+                name="non_bull_dl250_weight"
+                label={<Tooltip title="仅在 NEUTRAL/DEFENSIVE 非牛市生效：压降距250日低点涨幅过大高位股，偏向年线低位安全垫（默认 0.10）">非牛低位距离</Tooltip>}
+              >
+                <InputNumber min={0} max={0.5} step={0.02} className="w-full" />
+              </Form.Item>
+              <Form.Item
+                name="non_bull_bp250_weight"
+                label={<Tooltip title="仅在 NEUTRAL/DEFENSIVE 非牛市生效：倾斜自身250日PB估值历史低位股，增强防守安全边际（默认 0.10）">非牛PB低位分位</Tooltip>}
               >
                 <InputNumber min={0} max={0.5} step={0.02} className="w-full" />
               </Form.Item>

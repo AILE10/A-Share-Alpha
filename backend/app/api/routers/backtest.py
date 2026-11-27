@@ -19,10 +19,15 @@ from pydantic import BaseModel, Field
 from app.api.ws_manager import ws_manager
 from app.backtest.engine import BacktestConfig
 from app.core.constants import (
+    DEFAULT_BUFFER_RANK,
     DEFAULT_BULL_MOM_H120_WEIGHT,
     DEFAULT_BULL_MOM_RET20_WEIGHT,
     DEFAULT_DRAWDOWN_WARN_PCT,
+    DEFAULT_NON_BULL_BP250_WEIGHT,
+    DEFAULT_NON_BULL_DL250_WEIGHT,
+    DEFAULT_TARGET_HOLDINGS,
     DEFAULT_WARN_EXPOSURE_MULT,
+    DEFAULT_WEIGHT_METHOD,
 )
 from app.db.duckdb_client import get_duckdb
 from app.db.models import BacktestRun
@@ -48,7 +53,7 @@ class BacktestRunRequest(BaseModel):
     model_mode: str = Field(default="regression", pattern="^(lambdarank|regression)$")
     label_horizon: int = Field(default=10, ge=5, le=20)
     ensemble_seeds_count: int = Field(default=6, ge=1, le=12)
-    weight_method: str = Field(default="risk_parity", pattern="^(risk_parity|equal_weight)$")
+    weight_method: str = Field(default=DEFAULT_WEIGHT_METHOD, pattern="^(risk_parity|equal_weight)$")
     holding_mode: str = Field(default="dynamic", pattern="^(dynamic|fixed)$")
     rebalance_days: int = Field(default=10, ge=1, le=20)
     min_hold_days: int = Field(default=10, ge=1, le=30)
@@ -58,8 +63,8 @@ class BacktestRunRequest(BaseModel):
     profit_ride_pct: float = Field(default=0.10, ge=0.03, le=0.50)
     profit_protect_pct: float = Field(default=0.15, ge=0.05, le=0.50)
     stop_cooldown_days: int = Field(default=5, ge=0, le=15)
-    target_holdings: int = Field(default=10, ge=5, le=20)
-    buffer_rank: int = Field(default=35, ge=10, le=80)
+    target_holdings: int = Field(default=DEFAULT_TARGET_HOLDINGS, ge=5, le=20)
+    buffer_rank: int = Field(default=DEFAULT_BUFFER_RANK, ge=10, le=80)
     max_single_weight: float = Field(default=0.12, ge=0.05, le=0.25)
     max_industry_weight: float = Field(default=0.25, ge=0.10, le=0.50)
     hard_stop_pct: float = Field(default=0.08, ge=0.03, le=0.20)
@@ -69,6 +74,8 @@ class BacktestRunRequest(BaseModel):
     enable_technical_filter: bool = True
     bull_mom_h120_weight: float = Field(default=DEFAULT_BULL_MOM_H120_WEIGHT, ge=0.0, le=0.50)
     bull_mom_ret20_weight: float = Field(default=DEFAULT_BULL_MOM_RET20_WEIGHT, ge=0.0, le=0.50)
+    non_bull_dl250_weight: float = Field(default=DEFAULT_NON_BULL_DL250_WEIGHT, ge=0.0, le=0.50)
+    non_bull_bp250_weight: float = Field(default=DEFAULT_NON_BULL_BP250_WEIGHT, ge=0.0, le=0.50)
     drawdown_warn_pct: float = Field(default=DEFAULT_DRAWDOWN_WARN_PCT, ge=0.05, le=0.20)
     warn_exposure_mult: float = Field(default=DEFAULT_WARN_EXPOSURE_MULT, ge=0.30, le=1.0)
     cash_yield_rate: float = Field(default=0.0, ge=0.0, le=0.05)
@@ -125,6 +132,8 @@ def _build_configs(req: BacktestRunRequest) -> tuple[LGBMConfig, BacktestConfig]
         enable_technical_filter=req.enable_technical_filter,
         bull_mom_h120_weight=req.bull_mom_h120_weight,
         bull_mom_ret20_weight=req.bull_mom_ret20_weight,
+        non_bull_dl250_weight=req.non_bull_dl250_weight,
+        non_bull_bp250_weight=req.non_bull_bp250_weight,
         drawdown_warn_pct=req.drawdown_warn_pct,
         warn_exposure_mult=req.warn_exposure_mult,
         cash_yield_rate=req.cash_yield_rate,

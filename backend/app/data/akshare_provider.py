@@ -17,6 +17,7 @@ from app.core.constants import (
     BENCHMARK_INDEX_META,
     detect_board,
     normalize_ts_code,
+    round_price,
     ts_code_to_ak_prefix,
     ts_code_to_symbol,
 )
@@ -83,6 +84,56 @@ def _pick_col(df: pd.DataFrame, candidates: list[str]) -> pd.Series:
         if c in df.columns:
             return df[c]
     return pd.Series(np.nan, index=df.index)
+
+
+def parse_tencent_fh_dict(fh_dict: object) -> dict | None:
+    """Parse Tencent kline r[6] corporate action payload into per-share ratios.
+
+    Handles annual/interim/special cash dividends ('10派X元'), bonus shares ('10送X股'),
+    capital reserve transfers ('10转X股'), and marks rights-issue ex-dates where
+    Tencent emits a non-empty dict with empty FHcontent.
+    """
+    import re
+
+    if not isinstance(fh_dict, dict) or not fh_dict:
+        return None
+    txt = str(fh_dict.get("FHcontent") or "").strip()
+
+    def _extract(pattern: str) -> float:
+        m = re.search(pattern, txt)
+        if not m:
+            return 0.0
+        base = float(m.group(1))
+        val = float(m.group(2))
+        return val / base if base > 0 else 0.0
+
+    bonus = _extract(r"(\d+(?:\.\d+)?)\s*股?送\s*(\d+(?:\.\d+)?)")
+    transfer = _extract(r"(\d+(?:\.\d+)?)\s*股?转(?:增)?\s*(\d+(?:\.\d+)?)")
+    cash = _extract(r"(\d+(?:\.\d+)?)\s*股?派(?:现|息)?\s*(\d+(?:\.\d+)?)")
+    if cash == 0.0 and fh_dict.get("fh_sh") not in (None, "", "0", 0):
+        try:
+            fh_val = float(fh_dict["fh_sh"])
+            if fh_val > 0:
+                cash = fh_val / 10.0
+        except (TypeError, ValueError):
+            pass
+    rights = _extract(r"(\d+(?:\.\d+)?)\s*股?配\s*(\d+(?:\.\d+)?)")
+    rights_price = 0.0
+    if rights > 0:
+        m_p = re.search(r"配股价\s*(\d+(?:\.\d+)?)", txt)
+        if m_p:
+            rights_price = float(m_p.group(1))
+    split_mult = 1.0 + bonus + transfer
+    return {
+        "bonus_ratio": round(bonus, 6),
+        "transfer_ratio": round(transfer, 6),
+        "cash_div": round(cash, 6),
+        "rights_ratio": round(rights, 6),
+        "rights_price": round(rights_price, 4),
+        "split_mult": round(split_mult, 6),
+        "raw_content": txt,
+        "is_unparsed_event": (split_mult <= 1.0 + 1e-9 and cash <= 1e-9 and rights <= 1e-9),
+    }
 
 
 class AKShareProvider(DataProvider):
@@ -168,6 +219,7 @@ class AKShareProvider(DataProvider):
             return empty_frame(DAILY_BAR_COLUMNS)
 
         parsed = []
+        raw_actions: dict[date, dict] = {}
         for r in rows:
             if not isinstance(r, list) or len(r) < 6:
                 continue
@@ -186,6 +238,10 @@ class AKShareProvider(DataProvider):
                 vol = float(r[5]) * vol_mult
             except (TypeError, ValueError):
                 continue
+            if adjust == "" and len(r) > 6 and isinstance(r[6], dict) and r[6]:
+                parsed_act = parse_tencent_fh_dict(r[6])
+                if parsed_act is not None:
+                    raw_actions[d_val] = parsed_act
             turn_pct = np.nan
             amt = np.nan
             if len(r) > 7 and r[7] not in ("", None):
@@ -203,12 +259,108 @@ class AKShareProvider(DataProvider):
         if not parsed:
             return empty_frame(DAILY_BAR_COLUMNS)
 
+        norm_code = normalize_ts_code(ts_code)
         df = pd.DataFrame(parsed, columns=["trade_date", "open", "high", "low", "close", "volume", "amount", "turnover_rate"])
         df = df.drop_duplicates("trade_date", keep="last").sort_values("trade_date").reset_index(drop=True)
-        df["ts_code"] = normalize_ts_code(ts_code)
-        df["pre_close"] = df["close"].shift(1)
+        df["ts_code"] = norm_code
+
+        # Compute exact exchange ex-right reference `pre_close` and true multiplicative `adj_factor`
+        close_arr = df["close"].to_numpy(dtype=float)
+        open_arr = df["open"].to_numpy(dtype=float)
+        dates_arr = df["trade_date"].tolist()
+        n = len(df)
+        pre_close_arr = np.full(n, np.nan, dtype=float)
+        adj_arr = np.ones(n, dtype=float)
+
+        # Rare rights-issue days (empty FHcontent dict) -> resolve exact ex_ref via single-stock hfq fallback
+        unparsed_dates = {d for d, a in raw_actions.items() if a.get("is_unparsed_event")}
+        hfq_close_map: dict[date, float] = {}
+        if adjust == "" and unparsed_dates:
+            try:
+                hfq_df = self._fetch_tx_kline_fast(ts_code, start, end, adjust="hfq")
+                if not hfq_df.empty:
+                    hfq_close_map = dict(zip(hfq_df["trade_date"], hfq_df["close"].astype(float)))
+            except Exception:  # noqa: BLE001
+                hfq_close_map = {}
+
+        ca_records: list[dict] = []
+        for i in range(n):
+            d_i = dates_arr[i]
+            act = raw_actions.get(d_i) if adjust == "" else None
+            if i == 0:
+                if act is not None and not act.get("is_unparsed_event"):
+                    ca_records.append({
+                        "ts_code": norm_code,
+                        "ex_date": d_i,
+                        "bonus_ratio": act["bonus_ratio"],
+                        "transfer_ratio": act["transfer_ratio"],
+                        "cash_div": act["cash_div"],
+                        "rights_ratio": act["rights_ratio"],
+                        "rights_price": act["rights_price"],
+                        "split_mult": act["split_mult"],
+                        "raw_content": act["raw_content"],
+                        "source": "tencent",
+                    })
+                continue
+
+            prev_c = close_arr[i - 1]
+            ex_ref = prev_c
+            if act is not None and prev_c > 0:
+                if not act.get("is_unparsed_event"):
+                    k_tot = act["split_mult"] + act["rights_ratio"]
+                    num = prev_c - act["cash_div"] + act["rights_price"] * act["rights_ratio"]
+                    cand = round_price(num / k_tot) if k_tot > 0 else prev_c
+                    if cand > 0.01:
+                        ex_ref = cand
+                    ca_records.append({
+                        "ts_code": norm_code,
+                        "ex_date": d_i,
+                        "bonus_ratio": act["bonus_ratio"],
+                        "transfer_ratio": act["transfer_ratio"],
+                        "cash_div": act["cash_div"],
+                        "rights_ratio": act["rights_ratio"],
+                        "rights_price": act["rights_price"],
+                        "split_mult": act["split_mult"],
+                        "raw_content": act["raw_content"],
+                        "source": "tencent",
+                    })
+                else:
+                    # Rights-issue ex-date with empty FHcontent: infer exchange ex_ref from hfq continuity
+                    h_prev = hfq_close_map.get(dates_arr[i - 1], np.nan)
+                    h_cur = hfq_close_map.get(d_i, np.nan)
+                    if np.isfinite(h_prev) and np.isfinite(h_cur) and h_prev > 0 and h_cur > 0 and close_arr[i] > 0:
+                        implied = round_price(close_arr[i] * (h_prev / h_cur))
+                        if 0.1 * prev_c <= implied <= 1.2 * prev_c:
+                            ex_ref = implied
+                            implied_k = prev_c / ex_ref
+                            ca_records.append({
+                                "ts_code": norm_code,
+                                "ex_date": d_i,
+                                "bonus_ratio": 0.0,
+                                "transfer_ratio": 0.0,
+                                "cash_div": round(max(0.0, prev_c - ex_ref), 6) if implied_k < 1.15 else 0.0,
+                                "rights_ratio": round(max(0.0, implied_k - 1.0), 6) if implied_k >= 1.15 else 0.0,
+                                "rights_price": 0.0,
+                                "split_mult": round(implied_k, 6) if implied_k >= 1.15 else 1.0,
+                                "raw_content": "rights_or_unparsed_cqr",
+                                "source": "tencent_hfq_inferred",
+                            })
+                    elif open_arr[i] > 0 and abs(open_arr[i] - prev_c) / prev_c > 0.12:
+                        ex_ref = round_price(open_arr[i])
+
+            pre_close_arr[i] = ex_ref
+            if ex_ref > 0 and prev_c > 0 and abs(ex_ref - prev_c) > 1e-6:
+                adj_arr[i] = adj_arr[i - 1] * (prev_c / ex_ref)
+            else:
+                adj_arr[i] = adj_arr[i - 1]
+
+        df["pre_close"] = pre_close_arr
         df["amplitude"] = (df["high"] - df["low"]) / df["pre_close"] * 100.0
-        return df[DAILY_BAR_COLUMNS]
+        out = df[DAILY_BAR_COLUMNS].copy()
+        if adjust == "":
+            out["adj_factor"] = adj_arr
+            out.attrs["corporate_actions"] = pd.DataFrame(ca_records) if ca_records else pd.DataFrame()
+        return out
 
     def _throttle(self) -> None:
         elapsed = time.monotonic() - self._last_call
@@ -508,20 +660,12 @@ class AKShareProvider(DataProvider):
         return empty_frame(CAPITAL_FLOW_COLUMNS), ""
 
     def get_daily_bars_with_hfq(self, ts_code: str, start: date, end: date) -> pd.DataFrame:
-        """Fetch UNADJUSTED bars + backward adj_factor (hfq_close / raw_close) from Tencent CDN (keep-alive pooled)."""
+        """Fetch UNADJUSTED bars + exact exchange ex-right pre_close + true multiplicative total-return
+        adj_factor in a SINGLE keep-alive Tencent CDN request (with corporate_actions attached in attrs)."""
         try:
             raw = self._fetch_tx_kline_fast(ts_code, start, end, adjust="")
             if not raw.empty:
-                try:
-                    hfq = self._fetch_tx_kline_fast(ts_code, start, end, adjust="hfq")
-                    if not hfq.empty:
-                        hfq_map = dict(zip(hfq["trade_date"], hfq["close"]))
-                        hfq_c = raw["trade_date"].map(hfq_map).astype(float)
-                        adj = (hfq_c / raw["close"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
-                        raw["adj_factor"] = adj.ffill().bfill().fillna(1.0)
-                    else:
-                        raw["adj_factor"] = 1.0
-                except Exception:  # noqa: BLE001
+                if "adj_factor" not in raw.columns:
                     raw["adj_factor"] = 1.0
                 return raw
         except Exception as exc:  # noqa: BLE001

@@ -42,27 +42,50 @@ class MarketPanel:
     basic: pd.DataFrame = field(default_factory=pd.DataFrame)
     capital_flow_ratio: pd.DataFrame | None = None
     fundamentals: dict[str, pd.DataFrame] = field(default_factory=dict)
+    split_mult: pd.DataFrame | None = None
+    cash_div: pd.DataFrame | None = None
+    _cache: dict = field(default_factory=dict, repr=False, compare=False)
 
-    # backward-adjusted prices ---------------------------------------------
+    # backward-adjusted prices (lazily cached; 100% read-only & deterministic)
     @property
     def hfq_close(self) -> pd.DataFrame:
-        return self.close * self.adj
+        c = self._cache.get("hfq_close")
+        if c is None:
+            c = self.close * self.adj
+            self._cache["hfq_close"] = c
+        return c
 
     @property
     def hfq_open(self) -> pd.DataFrame:
-        return self.open * self.adj
+        c = self._cache.get("hfq_open")
+        if c is None:
+            c = self.open * self.adj
+            self._cache["hfq_open"] = c
+        return c
 
     @property
     def hfq_high(self) -> pd.DataFrame:
-        return self.high * self.adj
+        c = self._cache.get("hfq_high")
+        if c is None:
+            c = self.high * self.adj
+            self._cache["hfq_high"] = c
+        return c
 
     @property
     def hfq_low(self) -> pd.DataFrame:
-        return self.low * self.adj
+        c = self._cache.get("hfq_low")
+        if c is None:
+            c = self.low * self.adj
+            self._cache["hfq_low"] = c
+        return c
 
     @property
     def returns(self) -> pd.DataFrame:
-        return self.hfq_close.pct_change(fill_method=None)
+        c = self._cache.get("returns")
+        if c is None:
+            c = self.hfq_close.pct_change(fill_method=None)
+            self._cache["returns"] = c
+        return c
 
     def industry_of(self) -> pd.Series:
         if self.basic.empty:
@@ -94,6 +117,8 @@ class MarketPanel:
             basic=self.basic,
             capital_flow_ratio=cut(self.capital_flow_ratio),
             fundamentals={k: cut(v) for k, v in self.fundamentals.items()},
+            split_mult=cut(self.split_mult),
+            cash_div=cut(self.cash_div),
         )
 
 
@@ -203,6 +228,32 @@ def load_market_panel(
         for col in ("roe_ttm", "np_yoy_q"):
             fundamentals[col] = fund.pivot_table(index="trade_date", columns="ts_code", values=col, dropna=False).reindex(index=dates, columns=codes_sorted)
 
+    split_mult_df: pd.DataFrame | None = None
+    cash_div_df: pd.DataFrame | None = None
+    try:
+        ca = db.query_df(
+            "SELECT ts_code, ex_date, split_mult, cash_div FROM corporate_actions "
+            "WHERE ex_date BETWEEN ? AND ? AND ts_code IN ("
+            + ",".join(f"'{c}'" for c in codes_sorted)
+            + ")",
+            [dates[0].date(), dates[-1].date()],
+        )
+        if not ca.empty:
+            ca["ex_date"] = pd.to_datetime(ca["ex_date"])
+            split_mult_df = (
+                ca.pivot_table(index="ex_date", columns="ts_code", values="split_mult", aggfunc="last")
+                .reindex(index=dates, columns=codes_sorted)
+                .fillna(1.0)
+            )
+            cash_div_df = (
+                ca.pivot_table(index="ex_date", columns="ts_code", values="cash_div", aggfunc="last")
+                .reindex(index=dates, columns=codes_sorted)
+                .fillna(0.0)
+            )
+    except Exception:  # noqa: BLE001
+        # Backward compatibility for pre-existing test DBs without corporate_actions populated
+        pass
+
     return MarketPanel(
         dates=dates, codes=codes_sorted,
         open=piv["open"], high=piv["high"], low=piv["low"], close=piv["close"],
@@ -212,6 +263,7 @@ def load_market_panel(
         limit_up=piv["limit_up"], limit_down=piv["limit_down"],
         index_close=idx_close, index_bars=idx_bars, basic=basic,
         capital_flow_ratio=cf_wide, fundamentals=fundamentals,
+        split_mult=split_mult_df, cash_div=cash_div_df,
     )
 
 

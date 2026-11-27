@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from app.core.constants import DEFAULT_BUFFER_RANK
 from app.strategy.optimizer import PortfolioConfig
 
 
@@ -47,7 +48,7 @@ class HeldPositionState:
 class DynamicHoldingConfig:
     min_hold_days: int = 10                # Min trading days before non-stop rank exit
     regime_adaptive_min_hold: bool = True  # OFFENSIVE -> max(5, min_hold_days - 3)
-    buffer_rank: int = 35                  # Normal keep-holding buffer rank
+    buffer_rank: int = DEFAULT_BUFFER_RANK  # Normal keep-holding buffer rank (45 for N=15)
     deep_exit_rank: int = 150              # Deep alpha-decay threshold -> exit after confirm
     exit_confirm_days: int = 3             # Consecutive weak-rank days required to confirm exit
     swap_score_gap: float = 0.70           # Min z-score advantage of replacement to trigger mid-zone swap
@@ -103,18 +104,26 @@ def select_dynamic_portfolio(
     regime: str = "NEUTRAL",
     target_exposure: float = 0.55,
     allow_new_entries: bool = True,
+    precomputed_valid: pd.Series | None = None,
+    precomputed_rank_map: dict[str, int] | None = None,
+    industries_dict: dict[str, str] | None = None,
 ) -> DynamicSelectionResult:
     """Asymmetric dynamic holding & event-driven replacement selection (zero look-ahead)."""
-    valid = scores.where(eligible.reindex(scores.index).fillna(False)).dropna().sort_values(ascending=False)
+    if precomputed_valid is not None:
+        valid = precomputed_valid
+    else:
+        valid = scores.where(eligible.reindex(scores.index).fillna(False)).dropna().sort_values(ascending=False)
     if valid.empty:
         return DynamicSelectionResult(selected=[], rank_map={})
 
-    rank_map = {code: idx + 1 for idx, code in enumerate(valid.index)}
-    s_mean = float(valid.mean())
-    s_std = float(valid.std(ddof=1)) if len(valid) > 1 else 1.0
+    rank_map = precomputed_rank_map if precomputed_rank_map is not None else {code: idx + 1 for idx, code in enumerate(valid.index)}
+    v_arr = valid.to_numpy(dtype=float)
+    s_mean = float(np.mean(v_arr))
+    s_std = float(np.std(v_arr, ddof=1)) if len(v_arr) > 1 else 1.0
     if s_std < 1e-12:
         s_std = 1.0
-    score_z = ((valid - s_mean) / s_std).to_dict()
+    score_z = dict(zip(valid.index, (v_arr - s_mean) / s_std))
+    ind_lookup = industries_dict if industries_dict is not None else industries.to_dict()
 
     if target_exposure <= 1e-6:
         sell_reasons = {
@@ -154,12 +163,12 @@ def select_dynamic_portfolio(
     buy_reasons: dict[str, str] = {}
 
     def _can_add(code: str) -> bool:
-        ind = str(industries.get(code, "未分类"))
+        ind = str(ind_lookup.get(code, "未分类"))
         return ind_counts.get(ind, 0) < max_names_per_ind
 
     def _add(code: str) -> None:
         selected.append(code)
-        ind = str(industries.get(code, "未分类"))
+        ind = str(ind_lookup.get(code, "未分类"))
         ind_counts[ind] = ind_counts.get(ind, 0) + 1
 
     def _peek_best_cand() -> str | None:

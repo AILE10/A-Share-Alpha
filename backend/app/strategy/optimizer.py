@@ -11,17 +11,19 @@ import pandas as pd
 from scipy.optimize import minimize
 from sklearn.covariance import LedoitWolf
 
+from app.core.constants import DEFAULT_BUFFER_RANK, DEFAULT_TARGET_HOLDINGS, DEFAULT_WEIGHT_METHOD
+
 WeightMethod = Literal["risk_parity", "equal_weight"]
 
 
 @dataclass
 class PortfolioConfig:
     top_candidates: int = 30
-    target_holdings: int = 10            # 8~12 只持股
-    buffer_rank: int = 25                # 已持仓若仍在模型排名前 25 则保留
+    target_holdings: int = DEFAULT_TARGET_HOLDINGS       # Champion V2：15 只分散持股
+    buffer_rank: int = DEFAULT_BUFFER_RANK               # Champion V2：前 45 名缓冲带
     max_single_weight: float = 0.12      # 单票上限 12%
     max_industry_weight: float = 0.25    # 单申万一级行业上限 25%
-    weight_method: WeightMethod = "risk_parity"
+    weight_method: WeightMethod = DEFAULT_WEIGHT_METHOD  # type: ignore[assignment]
     cov_window: int = 60
 
 

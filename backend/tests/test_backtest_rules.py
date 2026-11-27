@@ -529,10 +529,136 @@ class TestRealDataBacktestIntegration:
         base_z = (base_scores - base_scores.mean()) / base_scores.std()
         assert np.corrcoef((tilted - base_z).to_numpy(), mom_comb.to_numpy())[0, 1] > 0.99
 
-        # 3) BacktestConfig defaults expose verified Champion 1b parameters
+        # 3) BacktestConfig defaults expose verified Champion V2 Dual-Anchor parameters
         cfg = BacktestConfig()
+        assert cfg.target_holdings == 15
+        assert cfg.buffer_rank == 45
+        assert cfg.weight_method == "equal_weight"
         assert cfg.bull_mom_h120_weight == pytest.approx(0.25)
         assert cfg.bull_mom_ret20_weight == pytest.approx(0.0)
+        assert cfg.non_bull_dl250_weight == pytest.approx(0.10)
+        assert cfg.non_bull_bp250_weight == pytest.approx(0.10)
         assert cfg.drawdown_warn_pct == pytest.approx(0.11)
         assert cfg.drawdown_halt_pct == pytest.approx(0.12)
         assert cfg.warn_exposure_mult == pytest.approx(0.70)
+
+        # 4) Non-bull 250d low-position safety anchor: strictly causal zero look-ahead + regime gating!
+        from app.strategy.regime import apply_non_bull_lowpos_overlay, compute_non_bull_lowpos_zscores
+
+        zdl_full, zbp_full = compute_non_bull_lowpos_zscores(panel, elig)
+        zdl_trunc, zbp_trunc = compute_non_bull_lowpos_zscores(trunc_panel, elig.loc[:cut])
+        pd.testing.assert_series_equal(zdl_full.loc[cut], zdl_trunc.loc[cut], check_names=False)
+        pd.testing.assert_series_equal(zbp_full.loc[cut], zbp_trunc.loc[cut], check_names=False)
+
+        # OFFENSIVE bull regime MUST leave scores completely untouched; NEUTRAL/DEFENSIVE applies anchor
+        pd.testing.assert_series_equal(
+            apply_non_bull_lowpos_overlay(base_scores, "OFFENSIVE", zdl_full.loc[cut], zbp_full.loc[cut]),
+            base_scores,
+        )
+        for non_bull in ("NEUTRAL", "DEFENSIVE"):
+            anchored = apply_non_bull_lowpos_overlay(
+                base_scores, non_bull, zdl_full.loc[cut], zbp_full.loc[cut], w_dl250=0.10, w_bp250=0.10
+            )
+            assert not np.allclose(anchored.to_numpy(), base_scores.to_numpy(), equal_nan=True)
+
+    def test_ex_dividend_and_stock_split_accounting_zero_phantom_loss(self):
+        """Regression test for real BYD 2025-07-29 (10送8转12派39.74元, k=3.0) & cash dividend:
+        verifies zero phantom crash, zero false -8% stop-loss, zero false limit-down lock,
+        and exact CSDC share-split + cash dividend accounting."""
+        from app.core.constants import calc_limit_prices
+        from app.data.akshare_provider import parse_tencent_fh_dict
+        from app.factors.panel import MarketPanel
+
+        # 1) Parser unit checks on real Tencent r[6] payloads
+        byd_act = parse_tencent_fh_dict({"FHcontent": "10送8股, 10转12股, 10派39.74元", "fh_sh": "39.74"})
+        assert byd_act is not None
+        assert byd_act["split_mult"] == pytest.approx(3.0)
+        assert byd_act["cash_div"] == pytest.approx(3.974)
+        assert byd_act["is_unparsed_event"] is False
+
+        mt_act = parse_tencent_fh_dict({"FHcontent": "增加特别派息10派219.1元", "fh_sh": "219.1"})
+        assert mt_act is not None
+        assert mt_act["split_mult"] == pytest.approx(1.0)
+        assert mt_act["cash_div"] == pytest.approx(21.91)
+
+        # 2) Build exact 12-day deterministic panel modeled on BYD 2025-07-29 split (day 5) + cash div (day 8)
+        dates = pd.bdate_range("2025-07-22", periods=12)
+        code = "002594.SZ"
+        # Days 0..4: raw 337.00; Day 5: 3-for-1 split + 3.974 div -> ex_ref = (337.00 - 3.974)/3 = 111.01, close = 111.42 (+0.37%)
+        # Days 6..7: raw 111.42; Day 8: pure cash div 1.42 -> ex_ref = 110.00, close = 110.00 (0.00%); Days 9..11: 110.00
+        raw_c = [337.00] * 5 + [111.42, 111.42, 111.42, 110.00, 110.00, 110.00, 110.00]
+        raw_o = [337.00] * 5 + [112.01, 111.42, 111.42, 110.00, 110.00, 110.00, 110.00]
+        pre_c = [337.00] * 5 + [111.01, 111.42, 111.42, 110.00, 110.00, 110.00, 110.00]
+        split_v = [1.0] * 5 + [3.0] + [1.0] * 6
+        div_v = [0.0] * 5 + [3.974] + [0.0, 0.0, 1.42, 0.0, 0.0, 0.0]
+        adj_v = [1.0]
+        for i in range(1, len(dates)):
+            adj_v.append(adj_v[-1] * (raw_c[i - 1] / pre_c[i]) if abs(pre_c[i] - raw_c[i - 1]) > 1e-6 else adj_v[-1])
+        lu = [calc_limit_prices(p, code, False)[0] for p in pre_c]
+        ld = [calc_limit_prices(p, code, False)[1] for p in pre_c]
+
+        def _df(vals):
+            return pd.DataFrame({code: vals}, index=dates, dtype=float)
+
+        panel = MarketPanel(
+            dates=dates,
+            codes=[code],
+            open=_df(raw_o),
+            high=_df(raw_o),
+            low=_df(raw_c),
+            close=_df(raw_c),
+            pre_close=_df(pre_c),
+            volume=_df([1_000_000.0] * len(dates)),
+            amount=_df([1e8] * len(dates)),
+            turnover=_df([1.0] * len(dates)),
+            adj=_df(adj_v),
+            is_st=pd.DataFrame({code: [False] * len(dates)}, index=dates),
+            is_suspended=pd.DataFrame({code: [False] * len(dates)}, index=dates),
+            pe_ttm=_df([20.0] * len(dates)),
+            pb=_df([3.0] * len(dates)),
+            total_mv=_df([1e11] * len(dates)),
+            limit_up=_df(lu),
+            limit_down=_df(ld),
+            index_close={"000852.SH": pd.Series(5000.0, index=dates), "000300.SH": pd.Series(4000.0, index=dates)},
+            basic=pd.DataFrame([{"ts_code": code, "name": "比亚迪", "sw_l1_name": "汽车"}]),
+            split_mult=_df(split_v),
+            cash_div=_df(div_v),
+        )
+        # Verify multiplicative total-return identity on split day (day 5): +0.369% NOT -66.94%!
+        assert panel.returns.loc[dates[5], code] == pytest.approx(111.42 / 111.01 - 1.0, abs=1e-5)
+        assert panel.returns.loc[dates[8], code] == pytest.approx(0.0, abs=1e-5)
+
+        scores = pd.DataFrame({code: [1.0] * len(dates)}, index=dates)
+        elig = pd.DataFrame({code: [True] * len(dates)}, index=dates)
+        tech = compute_technical_signals(panel)
+        reg = pd.DataFrame(
+            {"regime": "OFFENSIVE", "target_exposure": 0.90, "style_mode": "ALL_CAP", "min_mcap_quantile": 0.0},
+            index=dates,
+        )
+        res = AShareBacktestEngine(
+            BacktestConfig(
+                initial_cash=1_000_000.0,
+                holding_mode="fixed",
+                rebalance_days=20,
+                target_holdings=1,
+                max_single_weight=0.50,
+                max_industry_weight=1.0,
+                weight_method="equal_weight",
+                slippage_bps=0.0,
+                hard_stop_pct=0.08,
+                enable_regime_timing=False,
+                enable_technical_filter=False,
+                bull_mom_h120_weight=0.0,
+            )
+        ).run(panel, scores, elig, tech, reg)
+
+        # Must buy on day 1, NEVER trigger false -8% stop on split day 5, ZERO rejected orders, positive total return!
+        assert len(res.rejected_orders) == 0
+        sells = [t for t in res.trades if t["side"] == "SELL"]
+        assert len(sells) == 0, f"Unexpected false stop/sell on split day: {sells}"
+        # Equity on split day 5 MUST rise vs day 4 (+0.37% on position), NEVER drop -30%!
+        nav_d4 = float(res.daily_nav.iloc[4])
+        nav_d5 = float(res.daily_nav.iloc[5])
+        nav_d8 = float(res.daily_nav.iloc[8])
+        assert nav_d5 > nav_d4, f"Phantom loss on 3-for-1 split day: d4={nav_d4}, d5={nav_d5}"
+        assert nav_d8 == pytest.approx(nav_d5, abs=5.0), f"Phantom loss on cash dividend day: d5={nav_d5}, d8={nav_d8}"

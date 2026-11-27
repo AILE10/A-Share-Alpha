@@ -329,6 +329,64 @@ class DataSyncService:
         merged["ts_code"] = normalize_ts_code(ts_code)
         return merged.sort_values("trade_date").reset_index(drop=True), source
 
+    def _anchor_adj_factor(
+        self,
+        ts_code: str,
+        bars: pd.DataFrame,
+        anchor_map: dict[str, tuple[date, float, float]] | None = None,
+    ) -> pd.DataFrame:
+        """Keep multiplicative adj_factor 100% continuous across incremental daily sync seams.
+
+        When an incremental slice starts after existing history in DuckDB, scale the incoming
+        multiplicative adj_factor series so the earliest overlapping trading day matches the
+        already-persisted adj_factor (or chains cleanly from the immediately preceding stored day).
+        """
+        if bars is None or bars.empty or "adj_factor" not in bars.columns:
+            return bars
+        ca_attr = bars.attrs.get("corporate_actions")
+        bars = bars.sort_values("trade_date").reset_index(drop=True)
+        first_dt = pd.to_datetime(bars["trade_date"].iloc[0]).date()
+        first_adj = float(bars["adj_factor"].iloc[0])
+        if not np.isfinite(first_adj) or first_adj <= 0:
+            return bars
+
+        anchor_val: float | None = None
+        if anchor_map is not None:
+            hit = anchor_map.get(ts_code)
+            if hit is not None:
+                a_dt, a_adj, a_close = hit
+                if a_dt == first_dt and a_adj > 0:
+                    anchor_val = a_adj
+                elif a_dt < first_dt and a_adj > 0:
+                    # Chain across boundary day if no exact overlap
+                    ex_ref = float(bars["pre_close"].iloc[0]) if pd.notna(bars["pre_close"].iloc[0]) else a_close
+                    if ex_ref > 0 and a_close > 0 and abs(ex_ref - a_close) > 1e-6:
+                        anchor_val = a_adj * (a_close / ex_ref)
+                    else:
+                        anchor_val = a_adj
+        else:
+            row = self.db.query_df(
+                "SELECT trade_date, adj_factor, close FROM daily_bars "
+                "WHERE ts_code = ? AND trade_date <= ? ORDER BY trade_date DESC LIMIT 1",
+                [ts_code, first_dt],
+            )
+            if not row.empty:
+                a_dt = pd.to_datetime(row["trade_date"].iloc[0]).date()
+                a_adj = float(row["adj_factor"].iloc[0])
+                a_close = float(row["close"].iloc[0])
+                if np.isfinite(a_adj) and a_adj > 0:
+                    if a_dt == first_dt:
+                        anchor_val = a_adj
+                    else:
+                        ex_ref = float(bars["pre_close"].iloc[0]) if pd.notna(bars["pre_close"].iloc[0]) else a_close
+                        anchor_val = a_adj * (a_close / ex_ref) if (ex_ref > 0 and a_close > 0 and abs(ex_ref - a_close) > 1e-6) else a_adj
+
+        if anchor_val is not None and anchor_val > 0 and abs(anchor_val - first_adj) / anchor_val > 1e-7:
+            bars["adj_factor"] = bars["adj_factor"].astype(float) * (anchor_val / first_adj)
+        if ca_attr is not None:
+            bars.attrs["corporate_actions"] = ca_attr
+        return bars
+
     def sync_daily_bars(
         self,
         ts_codes: list[str],
@@ -395,6 +453,10 @@ class DataSyncService:
                     bars["total_mv"] = bars["circ_mv"]
 
                 bars["source"] = source
+                bars = self._anchor_adj_factor(code, bars)
+                ca_df = bars.attrs.get("corporate_actions")
+                if isinstance(ca_df, pd.DataFrame) and not ca_df.empty:
+                    self.db.upsert_df("corporate_actions", ca_df)
                 report.bar_rows += self.db.upsert_df("daily_bars", bars)
                 report.stocks_synced += 1
                 report.sources[source] = report.sources.get(source, 0) + 1
@@ -899,9 +961,28 @@ class DataSyncService:
         basic_st = self.db.query_df("SELECT ts_code, is_st_latest FROM stock_basic")
         st_map = dict(zip(basic_st["ts_code"], basic_st["is_st_latest"].astype(bool))) if not basic_st.empty else {}
 
+        # Pre-load multiplicative adj_factor anchor at/before `start` for seamless incremental stitching
+        anchor_df = self.db.query_df(
+            """
+            SELECT ts_code, trade_date, adj_factor, close FROM (
+                SELECT ts_code, trade_date, adj_factor, close,
+                       ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
+                FROM daily_bars
+                WHERE trade_date <= ?
+            ) WHERE rn = 1
+            """,
+            [start],
+        )
+        anchor_map: dict[str, tuple[date, float, float]] = {}
+        if not anchor_df.empty:
+            anchor_df["trade_date"] = pd.to_datetime(anchor_df["trade_date"]).dt.date
+            for r in anchor_df.itertuples(index=False):
+                if pd.notna(r.adj_factor) and float(r.adj_factor) > 0:
+                    anchor_map[str(r.ts_code)] = (r.trade_date, float(r.adj_factor), float(r.close or 0.0))
+
         fast_primary = AKShareProvider(request_interval=0.05)
 
-        def _fetch_and_prepare(code: str) -> tuple[str, pd.DataFrame | None, str, str]:
+        def _fetch_and_prepare(code: str) -> tuple[str, pd.DataFrame | None, pd.DataFrame | None, str, str]:
             try:
                 is_st_hint = st_map.get(code, False)
                 if enrich_baostock:
@@ -912,8 +993,11 @@ class DataSyncService:
                     if bars.empty and self.backup._probe_server():
                         bars, source = self._fetch_bars_primary_and_backup(code, start, end, is_st_hint=is_st_hint)
                     if bars.empty:
-                        return code, None, "", "empty bars from providers"
+                        return code, None, None, "", "empty bars from providers"
+                    ca_attr = bars.attrs.get("corporate_actions")
                     bars = bars.copy()
+                    if ca_attr is not None:
+                        bars.attrs["corporate_actions"] = ca_attr
                     bars["pe_ttm"] = np.nan
                     bars["pb"] = np.nan
                     bars["is_st"] = is_st_hint
@@ -957,16 +1041,23 @@ class DataSyncService:
 
                 bars["source"] = source
                 bars["ts_code"] = code
-                return code, bars, source, ""
+                bars = self._anchor_adj_factor(code, bars, anchor_map=anchor_map)
+                ca_df = bars.attrs.get("corporate_actions")
+                ca_out = ca_df if (isinstance(ca_df, pd.DataFrame) and not ca_df.empty) else None
+                return code, bars, ca_out, source, ""
             except Exception as exc:  # noqa: BLE001
-                return code, None, "", str(exc)
+                return code, None, None, "", str(exc)
 
         ckpt_file = get_settings().data_dir / "sync_checkpoint.json"
         buffer_frames: list[pd.DataFrame] = []
+        ca_buffer: list[pd.DataFrame] = []
         done = 0
         total_pending = len(pending)
 
         def _flush_buffer() -> None:
+            if ca_buffer:
+                self.db.upsert_df("corporate_actions", pd.concat(ca_buffer, ignore_index=True))
+                ca_buffer.clear()
             if not buffer_frames:
                 return
             combined = pd.concat(buffer_frames, ignore_index=True)
@@ -992,10 +1083,12 @@ class DataSyncService:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
                 futs = [pool.submit(_fetch_and_prepare, c) for c in pending]
                 for fut in concurrent.futures.as_completed(futs):
-                    code, bars, source, err = fut.result()
+                    code, bars, ca_df, source, err = fut.result()
                     done += 1
                     if bars is not None and not bars.empty:
                         buffer_frames.append(bars)
+                        if ca_df is not None and not ca_df.empty:
+                            ca_buffer.append(ca_df)
                         report.stocks_synced += 1
                         report.sources[source] = report.sources.get(source, 0) + 1
                     else:

@@ -12,6 +12,8 @@ from app.core.constants import (
     BENCHMARK_CSI300,
     DEFAULT_BULL_MOM_H120_WEIGHT,
     DEFAULT_BULL_MOM_RET20_WEIGHT,
+    DEFAULT_NON_BULL_BP250_WEIGHT,
+    DEFAULT_NON_BULL_DL250_WEIGHT,
 )
 from app.db.duckdb_client import DuckDBClient
 from app.factors.panel import MarketPanel
@@ -268,6 +270,66 @@ def apply_bull_momentum_overlay(
         adj = adj + float(w_h120) * z_h120_row.reindex(scores.index).fillna(0.0)
     if w_r20 > 0.0 and z_r20_row is not None:
         adj = adj + float(w_r20) * z_r20_row.reindex(scores.index).fillna(0.0)
+    adj = adj.where(valid_mask)
+
+    a_mu = float(adj.mean())
+    a_sd = float(adj.std())
+    if np.isfinite(a_sd) and a_sd > 1e-12:
+        return (adj - a_mu) / a_sd
+    return adj
+
+
+def compute_non_bull_lowpos_zscores(
+    panel: MarketPanel,
+    eligible: pd.DataFrame,
+    window: int = 250,
+    min_periods: int = 120,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Strictly causal cross-sectional z-scores of 250d long-cycle low-position anchors (day-t close only):
+      * z_dl250 : log(hfq_close / rolling_250d_min(hfq_low)) -> lower = closer to 1-year price floor
+      * z_bp250 : rolling 250d percentile rank of BP (1/PB)  -> higher = historically cheaper valuation
+    """
+    hc = panel.hfq_close
+    hl = panel.hfq_low
+    eff_min = min(min_periods, max(20, len(hc) // 3)) if len(hc) < min_periods else min_periods
+    low_n = hl.rolling(window, min_periods=eff_min).min()
+    raw_dl250 = np.log((hc / low_n.where(low_n > 1e-6)).clip(lower=1e-4))
+    bp_raw = (1.0 / panel.pb.where(panel.pb.abs() > 1e-6)).replace([np.inf, -np.inf], np.nan)
+    raw_bp250 = bp_raw.rolling(window, min_periods=eff_min).rank(pct=True)
+    z_dl250 = _row_zscore_frame(raw_dl250.where(eligible))
+    z_bp250 = _row_zscore_frame(raw_bp250.where(eligible))
+    return z_dl250, z_bp250
+
+
+def apply_non_bull_lowpos_overlay(
+    scores: pd.Series,
+    regime: str,
+    z_dl250_row: pd.Series | None,
+    z_bp250_row: pd.Series | None,
+    w_dl250: float = DEFAULT_NON_BULL_DL250_WEIGHT,
+    w_bp250: float = DEFAULT_NON_BULL_BP250_WEIGHT,
+) -> pd.Series:
+    """Apply 250-day long-cycle low-position safety anchor ONLY in Non-Bull (NEUTRAL / DEFENSIVE) regimes.
+
+    Complements `apply_bull_momentum_overlay` (OFFENSIVE-only breakout tilt) to form Champion V2's
+    regime-symmetric Dual-Anchor architecture. Shared identically by AShareBacktestEngine and live
+    RecommendationEngine with zero look-ahead.
+    """
+    if regime == "OFFENSIVE" or (w_dl250 <= 0.0 and w_bp250 <= 0.0):
+        return scores
+    valid_mask = scores.notna()
+    if int(valid_mask.sum()) < 2:
+        return scores
+
+    s_mu = float(scores.mean())
+    s_sd = float(scores.std())
+    base_z = (scores - s_mu) / s_sd if (np.isfinite(s_sd) and s_sd > 1e-12) else scores.copy()
+
+    adj = base_z.copy()
+    if w_dl250 > 0.0 and z_dl250_row is not None:
+        adj = adj - float(w_dl250) * z_dl250_row.reindex(scores.index).fillna(0.0)
+    if w_bp250 > 0.0 and z_bp250_row is not None:
+        adj = adj + float(w_bp250) * z_bp250_row.reindex(scores.index).fillna(0.0)
     adj = adj.where(valid_mask)
 
     a_mu = float(adj.mean())

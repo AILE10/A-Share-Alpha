@@ -157,6 +157,20 @@ CREATE TABLE IF NOT EXISTS market_regime_daily (
     csi300_ma20 DOUBLE,
     csi300_ma60 DOUBLE
 );
+
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    ts_code VARCHAR NOT NULL,
+    ex_date DATE NOT NULL,
+    bonus_ratio DOUBLE DEFAULT 0.0,
+    transfer_ratio DOUBLE DEFAULT 0.0,
+    cash_div DOUBLE DEFAULT 0.0,
+    rights_ratio DOUBLE DEFAULT 0.0,
+    rights_price DOUBLE DEFAULT 0.0,
+    split_mult DOUBLE DEFAULT 1.0,
+    raw_content VARCHAR DEFAULT '',
+    source VARCHAR DEFAULT 'tencent',
+    PRIMARY KEY (ts_code, ex_date)
+);
 """
 
 
